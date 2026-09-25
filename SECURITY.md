@@ -27,7 +27,7 @@
 
 | 决定 | 原因 | 代价 |
 | --- | --- | --- |
-| DevTools 仅在 debug 构建开放 | release 包不应让任何人用 `chrome://inspect` 读到会话 | 排查线上问题需要单独装 debug 包 |
+| 应用侧仅在 debug 构建调用 `setWebContentsDebuggingEnabled(true)` | release 包不带 `FLAG_DEBUGGABLE`，正常用户设备上挂不上 `chrome://inspect` | 可调试的系统镜像（模拟器 `ro.debuggable=1`）会对所有应用开放 WebView DevTools，这不是本应用能关掉的；在模拟器上验证不等于在真机上验证 |
 | 明文 http 只对微博系域名放行 | 微博登录/SSO 跳转链里含明文环节，全禁会卡死登录 | 这些域名下的明文请求可被同网段嗅探 |
 | 允许第三方 Cookie | 微博跨域 SSO 需要 | 扩大跟踪面，仅限微博系域 |
 | `allowBackup="true"` | 沿用模板默认值，尚未评估 | 系统备份可能包含登录态。**在意请关闭设备上的应用备份** |
