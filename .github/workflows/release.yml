@@ -63,7 +63,10 @@ jobs:
           ver = sys.argv[1]
           src = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
           m = re.search(r'^## \[?%s\]?[^\n]*\n(.*?)(?=^## |\Z)' % re.escape(ver), src, re.S | re.M)
-          body = m.group(1).strip() if m else ''
+          # 章节末尾常跟着 [Unreleased]: https://… 这类链接定义,渲染出来是多余的一行
+          lines = [l for l in (m.group(1).splitlines() if m else [])
+                   if not re.match(r'^\[[^\]]+\]:\s+\S+\s*$', l)]
+          body = '\n'.join(lines).strip()
           text = 'pulse %s\n\n%s\n\n安装前先看 README 的「已知限制」与「下载」。' % (ver, body)
           if not body:
               text = 'pulse %s' % ver
