@@ -6,7 +6,7 @@
 
 ## 环境
 
-1. JDK 17；Android SDK 满足 `compileSdk 37` / `buildTools 36.0.0`。
+1. JDK 17；Android SDK 满足 `compileSdk 37`（build-tools 版本由 AGP 自选，不固定）。
 2. `local.properties` 写 `sdk.dir=…`（该文件不会进仓库）。
 3. `./gradlew assembleDebug` 能通过就算环境就绪。产物会同时出现在
    `app/build/outputs/apk/debug/` 与仓库同级的 `release/` 下。
