@@ -107,11 +107,12 @@ jobs:
         run: |
           set -euo pipefail
           VER="${TAG#v}"
+          # 重跑要无害:已发布过就到此为止,不报错也不重复建
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在,不动它"; exit 1
+            echo "Release $TAG 已存在,跳过创建"
+            exit 0
           fi
           ARGS=(--title "pulse $VER" --notes-file release-notes.md)
           case "$VER" in *-*) ARGS+=(--prerelease);; esac
           gh release create "$TAG" dist/*-release.apk dist/sha256.txt "${ARGS[@]}"
-          gh release view "$TAG" --json tagName,prerelease \
-            --jq '{tag:.tagName,prerelease:.prerelease}'
+          echo "已发布 https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
