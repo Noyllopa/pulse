@@ -11,7 +11,8 @@
 3. `./gradlew assembleDebug` 能通过就算环境就绪。产物会同时出现在
    `app/build/outputs/apk/debug/` 与仓库同级的 `release/` 下。
 4. 想出能安装的 release 包按 README 的「构建」配 `keystore.properties`。
-   CI 里没有密钥，所以 Actions 上传的 release 包永远是未签名的，只能拿来验证能否编译。
+   没有 CI，发布全靠手动：本地构建签名包，再传到 GitHub Release 的 Assets 里。
+   别人提的 PR 要自己拉下来编译一遍再决定合不合。
 
 ## 怎么读代码
 

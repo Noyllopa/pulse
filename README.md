@@ -6,6 +6,14 @@ m.weibo.cn 的安卓客户端：WebView 套壳 + 注入式样式与导航改造�
 早期版本，`1.0.1-alpha.1`（预发布）。没有自动化测试，改动只在 Android 模拟器的手机
 和平板上验证过，微博一改版它就有可能坏。
 
+## 下载
+
+APK 在 [Releases](https://github.com/Noyllopa/pulse/releases/latest) 页面，
+点 `pulse-<版本>-release.apk` 直接下。装之前先扫一眼[已知限制](#已知限制)。
+
+侧载会弹「未知来源」警告，Android 14 以上还要多点一次「仍要安装」。没有自动更新，
+升级就是重新下载覆盖安装（签名一致，登录态和数据不会丢）。
+
 ## 截图
 
 | 手机 · 深色 · 首页 | 手机 · 浅色 · 首页 | 手机 · 深色 · 正文页 |
@@ -21,11 +29,13 @@ m.weibo.cn 的安卓客户端：WebView 套壳 + 注入式样式与导航改造�
 
 ## 安装
 
+下载的 APK 传到手机点开即可（需允许未知来源）。接了 adb 的话：
+
 ```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r pulse-1.0.1-alpha.1-release.apk
 ```
 
-也可以把 APK 传到手机直接点开安装（需允许未知来源）。
+自己构建的话产物在 `app/build/outputs/apk/debug/app-debug.apk`，同样能装。
 
 ## 构建
 

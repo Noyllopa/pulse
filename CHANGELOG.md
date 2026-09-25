@@ -18,8 +18,8 @@
 ### Changed
 
 - 不再固定 `buildToolsVersion`，改由 AGP 选择，减少别人clone 后构建失败的情况。
-- CI 不再调用 `android-actions/setup-android`（它在 runner 上调 sdkmanager 会 exit 1），
-  改用 runner 自带的 Android SDK。
+- 移除 GitHub Actions 工作流。产物匿名下载本来就要 401 登录，它当不了分发渠道；
+  发布改为本地签名后手动上传 Release。
 
 ## 1.0.1-alpha.1 — 2026-09-26
 
