@@ -8,7 +8,7 @@ m.weibo.cn 的安卓客户端：WebView 套壳 + 注入式样式与导航改造�
 
 ## 下载
 
-APK 在 [Releases](https://github.com/Noyllopa/pulse/releases/latest) 页面，
+APK 在 [Releases](https://github.com/Noyllopa/pulse/releases) 页面，
 点 `pulse-<版本>-release.apk` 直接下。装之前先扫一眼[已知限制](#已知限制)。
 
 侧载会弹「未知来源」警告，Android 14 以上还要多点一次「仍要安装」。没有自动更新，
