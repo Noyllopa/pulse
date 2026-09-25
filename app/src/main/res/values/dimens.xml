@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="web_margin_horizontal">0dp</dimen>
+    <dimen name="web_corner_radius">0dp</dimen>
+    <dimen name="web_card_elevation">0dp</dimen>
+    <dimen name="web_max_width">640dp</dimen>
+</resources>

@@ -1,0 +1,32 @@
+name: 功能建议
+description: 提议一个新能力或改动现有行为
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        说明一下边界：这是给 m.weibo.cn 套壳 + 注入样式，能力上限就是网页能做到的事。
+        需要官方 API 才能做的（消息推送、发博带图、时间线排序算法等）大概率不会实现。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 用日常语言描述卡在哪，而不是"加一个 XX 按钮"
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 你期望它变成什么样
+    validations:
+      required: true
+  - type: textarea
+    id: alternative
+    attributes:
+      label: 别的做法
+      description: 想过或试过哪些替代方案
+  - type: textarea
+    id: scope
+    attributes:
+      label: 影响范围
+      description: 只在手机 / 只在平板 / 深浅色都一样 / 只在某类页面

@@ -1,0 +1,9 @@
+# 统一换行符:防止 Windows 上 checkout 出去的 gradlew 带 CRLF 而在 CI/Linux 里跑不动
+* text=auto
+gradlew text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.jar binary
+*.keystore binary

@@ -1,0 +1,26 @@
+# 构建产物与缓存
+.gradle/
+build/
+app/build/
+
+# 本机 SDK 路径,换人换机器都不一样,不进仓库
+local.properties
+
+# IDE
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 签名:密钥与口令一律不进仓库
+*.keystore
+*.jks
+keystore.properties
+
+# 产物目录(默认落在仓库外的 ../release,若有人把 pulse.outDir 指回仓库内也一并忽略)
+release/
+
+# 操作系统杂项
+.DS_Store
+Thumbs.db

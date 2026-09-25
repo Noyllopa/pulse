@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 微博登录/SSO 跳转链含 http 明文环节,对微博系域名放行明文,其余域名保持禁止 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">weibo.cn</domain>
+        <domain includeSubdomains="true">weibo.com</domain>
+        <domain includeSubdomains="true">weibo.com.cn</domain>
+        <domain includeSubdomains="true">weibo.cc</domain>
+        <domain includeSubdomains="true">t.cn</domain>
+        <domain includeSubdomains="true">sina.cn</domain>
+        <domain includeSubdomains="true">sina.com.cn</domain>
+        <domain includeSubdomains="true">sinaimg.cn</domain>
+        <domain includeSubdomains="true">weibocdn.com</domain>
+    </domain-config>
+</network-security-config>

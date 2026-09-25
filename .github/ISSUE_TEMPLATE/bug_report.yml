@@ -1,0 +1,73 @@
+name: 问题反馈
+description: 报告一个显示异常、手势失灵或崩溃
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个项目里"看起来一样"的现象往往有好几个不同成因，
+        所以下面的信息每一条都会直接影响能不能定位。缺了大概率只能回一句"复现不了"。
+  - type: input
+    id: device
+    attributes:
+      label: 设备与系统
+      description: 机型 + Android 版本；模拟器请写明 AVD 配置（分辨率与 dpi）
+      placeholder: "Pixel 6 / Android 14；或模拟器 1080x2400 @420dpi"
+    validations:
+      required: true
+  - type: input
+    id: webview
+    attributes:
+      label: WebView 版本
+      description: 设置 → 应用 → Android System WebView 的版本号。深色模式的算法加深行为随版本漂移，这条很关键
+      placeholder: "126.0.6478.134"
+    validations:
+      required: true
+  - type: dropdown
+    id: theme
+    attributes:
+      label: 深浅色
+      options: [浅色, 深色, 两者都有, 切换瞬间]
+    validations:
+      required: true
+  - type: input
+    id: page
+    attributes:
+      label: 页面
+      description: 哪个页面出的问题；能给出 URL 最好（debug 包可用 chrome://inspect 查看）
+      placeholder: "首页信息流 / 正文页 /detail/xxx / 设置 / 消息"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 进入…
+        2. 下滑到…
+        3. 看到…
+      value: |
+        1. 
+        2. 
+        3. 
+    validations:
+      required: true
+  - type: textarea
+    id: expect
+    attributes:
+      label: 期望是什么
+    validations:
+      required: true
+  - type: textarea
+    id: shots
+    attributes:
+      label: 截图或录屏
+      description: 直接拖进来。颜色类问题请尽量给原图，压缩过的截图会骗人
+  - type: textarea
+    id: version
+    attributes:
+      label: 应用版本
+      description: APK 文件名里的版本号（pulse-x.y.z-…）；不确定就留空
+      placeholder: "1.0.1-alpha.1"
+    validations:
+      required: true

@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      # 产物默认落在仓库外,CI 里指到仓库内的 artifacts/ 以便上传
+      - name: Build
+        run: ./gradlew assembleDebug assembleRelease --no-daemon -Ppulse.outDir=artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulse-apk
+          path: artifacts/*.apk
+          if-no-files-found: error

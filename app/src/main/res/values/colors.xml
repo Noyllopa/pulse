@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="launcher_background">#FFFFFF</color>
+    <color name="accent">#2563EB</color>
+    <!-- 与注入后的页面顶部同色(theme.js 把 html/body 刷成 #F3F4F6)。
+         状态栏透明 + content_holder 按内边距避让,这条带子就是本资源在画,
+         写 #FFFFFF 会在顶部压出一条可见的色差带(实测页面 243,244,246 而带子 255)。 -->
+    <color name="app_background">#F3F4F6</color>
+    <color name="web_surface">#F3F4F6</color>
+</resources>
