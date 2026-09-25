@@ -1,5 +1,6 @@
 import com.android.build.api.artifact.SingleArtifact
 import java.util.Locale
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -33,6 +34,19 @@ fun versionCodeOf(v: String): Int {
     return major * 1_000_000 + minor * 10_000 + patch * 100 + slot
 }
 
+/* 本地签名:仓库根放一个 keystore.properties(已被 gitignore)就会签 release,
+   没有则产出未签名 APK。文件内容:
+     storeFile=../pulse-release.jks
+     storePassword=…
+     keyAlias=…
+     keyPassword=…
+   密钥文件本身同样不要提交。 */
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val releaseSigned = keystoreProps.isNotEmpty()
+
 android {
     namespace = "com.noyllopa.pulse"
     compileSdk = 37
@@ -45,10 +59,24 @@ android {
         versionName = pulseVersion
     }
 
+    signingConfigs {
+        if (releaseSigned) {
+            create("local") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (releaseSigned) {
+                signingConfig = signingConfigs.getByName("local")
+            }
         }
     }
 
@@ -76,6 +104,9 @@ val outDir = rootProject.file(findProperty("pulse.outDir") ?: "../release")
 androidComponents {
     onVariants { variant ->
         val capitalised = variant.name.replaceFirstChar { it.titlecase(Locale.ROOT) }
+        /* 没配密钥时 release 包是装不上的,直接把这件事写进文件名 */
+        val artifactName =
+            if (variant.name == "release" && !releaseSigned) "release-unsigned" else variant.name
         val copy = tasks.register("copy${capitalised}Apk", Copy::class.java) {
             description = "把 ${variant.name} 的 APK 复制到 $outDir"
             group = "build"
@@ -84,7 +115,7 @@ androidComponents {
             include("*.apk")
             from(variant.artifacts.get(SingleArtifact.APK))
             into(outDir)
-            rename { "pulse-$pulseVersion-${variant.name}.apk" }
+            rename { "pulse-$pulseVersion-$artifactName.apk" }
         }
         /* 不能在这里 tasks.named("assembleX"):onVariants 回调跑的时候 AGP 还没建好这些任务,
            matching + configureEach 是惰性的,任务稍后出现也会挂上 */

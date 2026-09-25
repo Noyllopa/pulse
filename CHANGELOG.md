@@ -10,6 +10,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- release 签名支持：仓库根放 `keystore.properties` 即自动签名；未配置时产物文件名
+  标成 `-release-unsigned`，避免拿一个装不上的包去装。
+
+### Changed
+
+- 不再固定 `buildToolsVersion`，改由 AGP 选择，减少别人clone 后构建失败的情况。
+- CI 不再调用 `android-actions/setup-android`（它在 runner 上调 sdkmanager 会 exit 1），
+  改用 runner 自带的 Android SDK。
+
 ## 1.0.1-alpha.1 — 2026-09-26
 
 首次公开。这是预发布版本：只在 Android 模拟器的手机与平板两种配置上验证过，

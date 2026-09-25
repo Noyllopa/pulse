@@ -72,8 +72,8 @@
 
 5. 只有中文界面。字符串全在 `res/values/strings.xml`，没做多语言。
 
-6. 发布版未签名。仓库里不放任何密钥，`assembleRelease` 出来的是装不上的 APK，
-   要自己配签名。
+6. 默认发布版未签名。仓库里不放任何密钥，不配签名时 `assembleRelease` 出来的是装不上的 APK，
+   产物文件名会带 `-release-unsigned` 标出来。怎么签名见[构建](#构建)。
 
 ## 隐私与安全
 
@@ -111,8 +111,28 @@ sdk.dir=C\:/Users/you/AppData/Local/Android/Sdk
 
 ```
 release/pulse-1.0.1-alpha.1-debug.apk
-release/pulse-1.0.1-alpha.1-release.apk   # 未签名
+release/pulse-1.0.1-alpha.1-release-unsigned.apk
 ```
+
+没配签名时 release 产物名字里就带 `-unsigned`，这种包系统装不上（解析阶段就报
+`Package info is null` 之类）。要出能装的包，先生成密钥：
+
+```bash
+keytool -genkeypair -v -keystore pulse-release.jks -keyalg RSA -keysize 2048 \
+  -validity 10000 -alias pulse
+```
+
+然后在仓库根放一个 `keystore.properties`（`.gitignore` 已经挡住它和 `*.jks`，别提交）：
+
+```properties
+storeFile=../pulse-release.jks
+storePassword=…
+keyAlias=pulse
+keyPassword=…
+```
+
+有了它，`assembleRelease` 就会签名，产物变成 `pulse-<版本>-release.apk`。
+密钥丢了以后就再也无法覆盖升级，请自己备份。
 
 ## 安装
 
