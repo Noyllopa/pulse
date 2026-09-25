@@ -1,0 +1,88 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 还原签名密钥
+        env:
+          PULSE_KEYSTORE: ${{ secrets.PULSE_KEYSTORE }}
+          PULSE_KEYSTORE_PASSWORD: ${{ secrets.PULSE_KEYSTORE_PASSWORD }}
+          PULSE_KEY_ALIAS: ${{ secrets.PULSE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/pulse-release.jks"
+          printf '%s' "$PULSE_KEYSTORE" | base64 -d > "$KS"
+          # 只验证这个库能被口令打开,不输出任何内容
+          keytool -list -keystore "$KS" -storetype PKCS12 \
+            -storepass "$PULSE_KEYSTORE_PASSWORD" >/dev/null
+          {
+            echo "storeFile=$KS"
+            echo "storePassword=$PULSE_KEYSTORE_PASSWORD"
+            echo "keyAlias=$PULSE_KEY_ALIAS"
+            echo "keyPassword=$PULSE_KEYSTORE_PASSWORD"
+          } > keystore.properties
+
+      - name: 构建并签名
+        run: ./gradlew assembleRelease --no-daemon -Ppulse.outDir=dist
+
+      - name: 校验产物确实被签名
+        run: |
+          set -euo pipefail
+          APK=$(ls dist/*-release.apk)
+          if [ -e dist/*-release-unsigned.apk ]; then
+            echo "只产出了未签名包,说明 keystore.properties 没生效"; exit 1
+          fi
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)
+          OUT=$("$APKSIGNER" verify --print-certs "$APK")
+          echo "$OUT" | grep -a 'certificate DN'
+          echo "$OUT" | grep -qa 'CN=pulse'
+          ( cd dist && sha256sum *-release.apk > sha256.txt && cat sha256.txt )
+
+      - name: 从 CHANGELOG 取发布说明
+        run: |
+          set -euo pipefail
+          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
+          import pathlib, re, sys
+          ver = sys.argv[1]
+          src = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
+          m = re.search(r'^## \[?%s\]?[^\n]*\n(.*?)(?=^## |\Z)' % re.escape(ver), src, re.S | re.M)
+          body = m.group(1).strip() if m else ''
+          text = 'pulse %s\n\n%s\n\n安装前先看 README 的「已知限制」与「下载」。' % (ver, body)
+          if not body:
+              text = 'pulse %s' % ver
+          pathlib.Path('release-notes.md').write_text(text, encoding='utf-8')
+          print(text[:300])
+          PY
+
+      - name: 创建 Release 并上传 APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在,不动它"; exit 1
+          fi
+          ARGS=(--title "pulse $VER" --notes-file release-notes.md)
+          case "$VER" in *-*) ARGS+=(--prerelease);; esac
+          gh release create "$TAG" dist/*-release.apk dist/sha256.txt "${ARGS[@]}"
+          gh release view "$TAG" --json tagName,prerelease \
+            --jq '{tag:.tagName,prerelease:.prerelease}'

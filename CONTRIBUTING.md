@@ -11,8 +11,9 @@
 3. `./gradlew assembleDebug` 能通过就算环境就绪。产物会同时出现在
    `app/build/outputs/apk/debug/` 与仓库同级的 `release/` 下。
 4. 想出能安装的 release 包按 README 的「构建」配 `keystore.properties`。
-   没有 CI，发布全靠手动：本地构建签名包，再传到 GitHub Release 的 Assets 里。
-   别人提的 PR 要自己拉下来编译一遍再决定合不合。
+   仓库只有一个 tag 触发的发布工作流：推一个 `v*` 标签，它会用 GitHub Secrets 里的密钥
+   签名构建，校验产物确实被签名，然后建 Release 并挂上 APK 与 sha256。
+   PR 上没有编译检查，别人提的改动要自己拉下来编一遍再决定合不合。
 
 ## 怎么读代码
 

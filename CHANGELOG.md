@@ -17,9 +17,9 @@
 
 ### Changed
 
-- 不再固定 `buildToolsVersion`，改由 AGP 选择，减少别人clone 后构建失败的情况。
-- 移除 GitHub Actions 工作流。产物匿名下载本来就要 401 登录，它当不了分发渠道；
-  发布改为本地签名后手动上传 Release。
+- 不再固定 `buildToolsVersion`，改由 AGP 选择，别人 clone 后不必装特定版本也能构建。
+- 发布改由 tag 触发的工作流完成（构建、签名、校验、建 Release、挂 sha256），
+  取代原先只在 PR 上编译检查的流水线。
 
 ## 1.0.1-alpha.1 — 2026-09-26
 
