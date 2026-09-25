@@ -3,9 +3,17 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布的 tag，例如 v1.0.1-alpha.1
+        required: true
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   publish:
@@ -14,6 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ env.TAG }}
 
       - uses: actions/setup-java@v5
         with:
@@ -29,9 +38,12 @@ jobs:
           set -euo pipefail
           KS="$RUNNER_TEMP/pulse-release.jks"
           printf '%s' "$PULSE_KEYSTORE" | base64 -d > "$KS"
-          # 只验证这个库能被口令打开,不输出任何内容
+          # 只验证库能被口令打开、alias 确实在里面,不输出任何内容
           keytool -list -keystore "$KS" -storetype PKCS12 \
             -storepass "$PULSE_KEYSTORE_PASSWORD" >/dev/null
+          keytool -list -keystore "$KS" -storetype PKCS12 -alias "$PULSE_KEY_ALIAS" \
+            -storepass "$PULSE_KEYSTORE_PASSWORD" >/dev/null \
+            || { echo "::error::Secrets 里的 PULSE_KEY_ALIAS 在这个库中不存在"; exit 1; }
           {
             echo "storeFile=$KS"
             echo "storePassword=$PULSE_KEYSTORE_PASSWORD"
@@ -40,7 +52,22 @@ jobs:
           } > keystore.properties
 
       - name: 构建并签名
-        run: ./gradlew assembleRelease --no-daemon -Ppulse.outDir=dist
+        run: |
+          set -eo pipefail
+          ./gradlew assembleRelease --no-daemon --stacktrace -Ppulse.outDir=dist \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # 日志正文要登录才看得到;提成 annotation 才能被未登录的 API 读到
+      - name: 失败时抛出关键日志
+        if: failure()
+        run: |
+          set -uo pipefail
+          F="$RUNNER_TEMP/build.log"
+          [ -f "$F" ] || { echo "::error::没有构建日志可提取"; exit 0; }
+          grep -a -E "FAILURE:|What went wrong|^\* |^> |^e: |error:|Exception|Caused by" "$F" \
+            | tail -18 | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
 
       - name: 校验产物确实被签名
         run: |
@@ -58,7 +85,7 @@ jobs:
       - name: 从 CHANGELOG 取发布说明
         run: |
           set -euo pipefail
-          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
+          python3 - "${TAG#v}" <<'PY'
           import pathlib, re, sys
           ver = sys.argv[1]
           src = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
@@ -79,7 +106,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
           VER="${TAG#v}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在,不动它"; exit 1
