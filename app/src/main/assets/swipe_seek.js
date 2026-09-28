@@ -4,6 +4,8 @@
  * 只用站点自己的播放器(video.js)与它现成的时间显示:横向拖动直接改 video.currentTime,
  * 进度条与时间文本由站点自己更新,不另造控制层。
  * 纵向手势仍交给页面滚动,进度条上的拖动也仍归站点。
+ * 全屏看图(.pswp)里只有真视频吃这手势,live 图与动图交给站点的翻页。
+ * 顺带一件不相干但同宿主的事:按到播放器时把视频真实比例报给原生,全屏方向按它定。
  */
 (function () {
   if (!document.documentElement) return;
@@ -12,6 +14,9 @@
 
   var FULL_SWIPE_SECONDS = 60;   // 拖满整个播放器宽度 = 60s
   var START_THRESHOLD = 10;      // 超过这个横向位移才算拖动,避免吃掉点击
+  // 看图器里的短片阈值:live 图实测 2.58 / 2.83 / 3.01s,真视频 38.64 / 143.4s。
+  // 拖满一整屏等于 60s,对 3s 的片子只有"跳到结尾"一种结果 —— 不值得为它抢掉翻页。
+  var FLIP_UNDER_SECONDS = 10;
 
   function secondsPerPx(host) {
     var w = host.getBoundingClientRect().width || 1;
@@ -31,15 +36,35 @@
     return host.querySelector('video') || host;
   }
 
+  /* 站点的全屏看图(photoswipe)本身是个横向翻页的容器,而 live 图/动图在它里面
+     就是一张视频卡片(见 mvGallery 给 slide 塞的 html video)。那张卡片上横滑该翻页
+     还是该拖进度,按"这条片子值不值得拖"判:几秒的 live 图拖不动出意义,让给翻页;
+     几十秒以上的真视频仍然归拖进度。时长要到手势发生时才知道(元数据是异步到的),
+     拿不到时长时一律让给翻页 —— 宁可不拖,不能翻不动。 */
+  function inGallery(el) {
+    return !!(el.closest && el.closest('.pswp'));
+  }
+
   /* ---- 拖动时的进度与目标时间示意(样式在 theme.js) ---- */
   var hud = null, hudTimer = null;
 
+  /* 全屏时只有 :fullscreen 那棵子树会被渲染,挂在 <html> 上的节点根本不画
+     (实测:往 documentElement 塞一块红、往 fullscreenElement 塞一块绿,截屏里只有绿)。
+     所以示意的宿主要跟全屏元素走,否则"全屏后横滑看不见进度条"。 */
+  function hudHost() {
+    return document.fullscreenElement || document.webkitFullscreenElement ||
+      document.documentElement;
+  }
+
   function ensureHud() {
-    if (hud && hud.isConnected) return hud;
-    hud = document.createElement('div');
-    hud.id = 'bw-scrub';
-    hud.innerHTML = '<div class="t"></div><div class="bar"><i></i></div>';
-    document.documentElement.appendChild(hud);
+    var host = hudHost();
+    if (hud && hud.isConnected && hud.parentElement === host) return hud;
+    if (!hud) {
+      hud = document.createElement('div');
+      hud.id = 'bw-scrub';
+      hud.innerHTML = '<div class="t"></div><div class="bar"><i></i></div>';
+    }
+    host.appendChild(hud);
     return hud;
   }
 
@@ -67,6 +92,19 @@
   function bind(host) {
     if (host.__bwSeekBound) return;
     host.__bwSeekBound = true;
+    var gallery = inGallery(host);
+
+    /* 按到哪个播放器,就把那条片子的真实比例报给原生 —— 全屏方向要按它定,
+       而 onShowCustomView 那一刻原生侧看不到视频尺寸(容器树只有 0x0 的 FrameLayout)。
+       loadedmetadata 不冒泡,但捕获阶段照样经过宿主,所以两个都挂在 host 上。 */
+    function pushAspect() {
+      var v = videoOf(host);
+      if (v && v.videoWidth && window.BwNative && window.BwNative.setVideoAspect) {
+        window.BwNative.setVideoAspect(v.videoWidth, v.videoHeight);
+      }
+    }
+    host.addEventListener('pointerdown', pushAspect, true);
+    host.addEventListener('loadedmetadata', pushAspect, true);
 
     var startX = 0, startY = 0, startTime = 0, scrubbing = false, video = null;
 
@@ -75,6 +113,8 @@
       if (isProgressBar(e.target)) return;
       video = videoOf(host);
       if (!video || !isFinite(video.duration) || video.duration <= 0) return;
+      // 看图器里的 live 图/动图:横滑归站点翻页
+      if (gallery && video.duration < FLIP_UNDER_SECONDS) { video = null; return; }
       startX = e.clientX;
       startY = e.clientY;
       startTime = video.currentTime;

@@ -13,9 +13,14 @@
  * 所有步骤失败时静默跳过:最坏情况等于没有修复,不会破坏页面。
  */
 (function () {
-  if (!document.documentElement) return;
-
-  if (!window.__bwDarkFixReady) {
+  /* boot():onPageStarted 注入时 DOM 往往还没解析(documentElement 不存在),
+     直接 return 的话全部修复要等 onPageFinished 才生效 —— 登录页的站标预隐藏
+     就是死在这一拍上:卡片与站标先挂载、原图先画出来,预隐藏晚到,
+     用户看到的就是"进登录页先闪一下黄底黑字的原图"。改成 boot() 模式:
+     DOM 已在就立即跑;不在就 observe document,html 一出现立即补跑 ——
+     预隐藏 CSS 从**首次绘制之前**就位,原图根本没有出场机会。 */
+  function boot() {
+    if (!document.documentElement || window.__bwDarkFixReady) return;
     window.__bwDarkFixReady = true;
 
     var MIN_SIZE = 36;   // 更小的图标交给算法加深处理即可
@@ -173,6 +178,79 @@
       });
     }
 
+    /**
+     * 登录页(passport)的"微博"站标:深色下用覆盖层画深色版,不动 img.src。
+     *
+     * 原图是「黄底 app 图标 + 近黑"微博"字」(112x36,实测解码采样)。深色卡面上
+     * 那截黑字读不出来,而两条直觉改法都实测走不通:
+     * ① invert(1)+hue-rotate(180) 滤镜 —— 被算法加深的"图像反反相"撤销,原图照旧透出;
+     * ② 直接换 img.src —— src 是 vnode 属性,站点下次 patch 回写成原图;平板上 src
+     *    虽留得住,浅色文字版深色图又被加深按"未适配深色的图"再反相一次,颜色全错。
+     * 落地:叠一个与 img 同位同尺寸的 span 画深色版(字转 #BFBFBF、黄底图标保留),
+     * img 本体 opacity 归零(src 留给 Vue 随便改)。
+     * ⚠ background-image **并不豁免**于算法加深 —— 它同样按显示尺寸判定要不要反相,
+     *    所以 span 必须放大 6 倍再缩回(见 placePassportLogo 下方)。
+     */
+    var PASSPORT_LOGO_DARK = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAAAkCAYAAABR/76qAAAQq0lEQVR4Ae3Be5ieZX0g4Pt5v28yMySQCQRIICgnAcW1oKgRQvKga9V64LIeqlUrICJUq1JxFW0Ve3WXdj3shVpLbctSrOuCuq6gFi1cPBNgE7QqiEqUcD6FQ4SEhGRmvu/97XzzZphJSCQkcbd/eN/JJhGXsOqxkzu8LdWencTeIYggJY1AQmgkBJLtE0hSSqIapG9Ia/AQBg9OVH7r10sp2VIyLlZdpNsd+TfheQSS7RNICD0RpESECSklESGlpCcipJREhJ6UiKDq31u118uTasBvPbmUkkkpInTvOf8akY6jRoVaTyAhbF1SCbWk0qhRoTYhJSJIyYRIpCCSRo0KtdQ/T7X3a5Pf2m4pJe3uPee/UXSP87japBRIpNBICCSN6EopEV09gaQrNJIkIiRJT0RIkojQk1IS0ZVSEiP3ig03Rxp8RrILlFJ2yzk/ZitKKfOxr3E55+ttRSllEE970Yte9Iv+/n7ba2RkxLJlyw7V2Jhzvtt2KqXsj2Rczvlum0SE4eHhPXPOv7KFdhWjf9Staz0pEUFKNqmIGpWeqGspVaKu9aRUibqWUqUnaSSkuqP6+TdZdxvVTAb3Ys4h6n2fJdr9GhVRozJh/U0MPsPOKqVknFNK+Sq+knP+lc29DidpHGPrjsT5y5Ytq3FuzvkbtsOyZcuOwD9r/ASn2H4XYTY6WGhcKeX9eANGx8bGTujr6zMpIrS70V1UCT11hEpSR+ip1GqhUutJxkUtadTRVUnq6OqpJLVQSYysEQ8u1ZMSsZ60+lrVraSn/4F42vPVUatQR62nHrlby86JCONOxyycjNtLKetxBB7NOX/ZFkopz8Yi444//vjzW62WcfM1Kqy2C5RS5vv1Ko1USpmvcRP60X/ttdeeiO8bt3jx4vuqqtKu6s5sm1QalUaoVSqh1qhQo9JTIVBpBCqEcf2zxHP+RNrwsOiOinWreGgpHay8mDW3qo58nUhUKhM66+2s4eHhl+FQjV8sWbLk28PDwx/Hq3EvvuyJno1Tjet2u+e3Wi3j9jflTjup0+kYd5nt08JlnujPbbJ06dLfyzk/0I4YQ7J1IdQIjRqB2oSEQNKIICUiTBiaL4bmIZkwerxYcalYfSMP/EDVHuTwl5NqPRFhZ3Q6HeNOM+WzKSU7aD+N+rjjjrvdv1NtUZNCT0Ig2bpAMm6kq/rBfdz5CHN3U5/wdNGuSEnUQUp6qkcfkG69mr6ZzF6gO++Zque8QWfFkPqeq3XvXqq19xGqPRfoSXbONddc8xE8XWNZzvk6O+5gjQ3XXnvtmz3Rz3PON9hOrVbLuP/s1/tTDKLGuX6NhQsXPmBcW4wh6QmBJIStqUa60pd/pv7sz3XWPiZJQmidsJ/09y9XVyRJROipf3Ubj9xgwoNY9TTxnDdrH7rIxoeuZgNu+45qzjv0hLCjSilvwe9r1DjPDup0OsYdojETH/BEF+IG2ymlJOf8Db9GKeU9GESdc/6G7dCmK2lEkBIRnqC66SH1+5eqV64xKTQ6V92tfctDHDpHmGbBc8Tu+7L+IfUdl4o1d6pWXK468lXah7zOyE++rrv6bn1j62gP2FGllOPxPlPOzTmv9ETtUsrBGLJJKeVgzDXNNddccxj67GKdTsc111zzNdu2u0a7lPI123Z6zvkh49p0RB0mpCTqICUTIkhJdfkdxt59jaQWwla1a6KLWvXgiHTLGhL1f5gr9ttHa/Y8G677orTqBgOHv0RrzwU6tQndtfdpzVmAyg76MCqNL+Scv2Hr9sElNneJJ3qWKf+Ee7E3TtX4NopNSinPwhs0hkw5oJTycY0Vxx577MU40PY50La1bdIWXZNSTSRSbUIkqivvNvruYQm1WlLpCbWkEmq01PMGtL59s85Xbja6/H5JJdSq/XfX+urLxD576AwQ6+hbe5/20H4ioaYeWasdtUi1HfQjvAJfyTlfEBGGh4ffjG/lnB/11B2j0Vm4cOHnBgYGlFKOwqkaV+acf2rKfni1J5qDV2vsjotNWYVLbO40DKDG523u1TjIFtrqMSklk1J4XLXsASOnDaMrNEJXT5LUupKErrEjv6ZjTAiNWgj1PY9qffdW3nKYukunQ9XXp+6s1+mYkGb0oyOFHVUQOedPGzc8PPy7+ADOKKV8DpfiBtuh1WoZ90KNlQMDAzYZMmW1nfdQzvki05RS3o4B1Dnni0xTSjkKB9lCO+maFBFSSiKCFWuMvu0qdPWEWlIJtZ7QCI0k1GpJpafWlVRqXfHwRknX4KEv0Vm/WrXbHrrrHlaHCdVus4mOHXXsscde2Wq1rjTlFI3dsCbn/GP82HYopRyOORr7mjJkymqbuwFnaSzA+zVux+c1HrK5Z5RSvmZzu2u0Sylfs7l9bEVbdAkTUgrqJI12jX74Ol0jNlebVKnUapVKT6j1hFpPrVahVnPQTBFdM/Y5zAxEdKXB3fTtQ6t/vtaMGeiICDtixowZJpVSTsChGvcsXrz4e6WUZ+JgT+4uHG/KnFLKvjnn+zFkk0WLFq0yTc75QRTjSilHmLI251xsMjo6app+HGjbDrQd2nRMipqUiItu1v35aglhukrfS4/TXvg86eCnSzNnESHuW6X7oxtsvOjb2KCnknR1VZJ08Ex0TJcq5hz9ThOia0LYKd1u17hTTflKVVXGvQJ/6Ml9C8+3uSNwP+ZorG2323aBW/AJm/sCZqGLk23uTBxtC23RERoJ8fCYjZ+8Sa0rqYRaspeZ5/6xdMofsc/etpTQxqzz1ohvXmbk039n7MYbJZWursdOvNKM1yzQevtB0pFDIsKElIggJT3Jzrn66qvPwuGm3OKpeR721XgEQ3gmhnGoxmq7RgcP21yY8rDNjdmKdkRH0gjEd+5U26gn1Pp/76VmfPGz7D/fdBGh0+no6+vzuKHZ0tvfauCNr9P+k7Ns+Mcv6wljRi69jUvvMPPvXiAt3kdPBAkRdlop5VV4k627FD/y5N6G+ViLT+Ev8UKcjyM0HrJrHI7LbF0Ll9kObdEhmZAw8s271TqSSv9rXqHvkovo79ezevVqXzjvsy767xe67957tdptxy9Z4kN/9hHHL17scYOD2uefp++e+4xefoUptQ1n3mDgByeQSIkIUjIhwg4ppRyJj9iGnPNKrPQkSil34J9wMZaigyNLKUdgtsaNdo0x/Mrm9kalcb/NDaHfFtp0RK0xVhu7YRUS5ur/4ufo79dz5x13eOVLX+bWlStN6oyNueqKKywtxYX/45/9/utf73HttoG/+IiRy79nus5jj0r3rBP7DwjjgtBIkh10JmZo1KhsoZRyGo6zbVflnC8spXwMP845P1ZKuRFH4yRTrrNr/CLnfJJpSilXYjY6OedXmqaU8hkstoW2GFNFpae+Z71Q69ntfa9j331Metcpp7p15UrT7TtvnvtXrdLtdJz9gQ969Ykn6uvrMyme91wMCauFWlIJNYOhiq5arYpKrTahTnbQ9TgK38cqvMYT7YcjbdtNxuWciynLcTRerLFh0aJFP/SbczNmobad2qnuCJu0ukKtp3Xks0y6+Ze/tPSqqwwMDjrzrA+ICBf8/T/45uXfcfwLFhobHXX3XXe5/bbbPOOww0xKVSV0hFpPqLUPnsMQEaNSEEhhZw3j2QsXLvzj5cuXf8iTG0FoDNi25TgDlcYP2+22HTVjxgzHHnvsMcZVVWVLOefTTVNKGcJZGrfmnP/UFtqiY1KaUwk9tXrtoyqNtWvX6vmrT33SO884Xc8jjzxi4VHPNd3A4KDp4safqa023cAZBxAdE1IQiRQmRLIjlixZcuPIyMjpAwMDttNJOeebSymzUGzDkiVLfjY8PLwGszWus4NKKcdgyFMzBy/XuK+UssKUh3POP2wz5nGDSf9L5tt45V02fuM7Zn3gvXoOPuQQM2fN8osVK/Q8+OCDhq8qplvy4hc74IADTLfxk58Raj1JZeD1T9N62RAx5nFhmmRHpJQMDAx4Ev2mjNmGUsrcnPNDxqWUjLsZx2hcZ8e9C0fbcfPxV6b8EO9qRz0mJY8bOGlvG668w8Zrv2vgwi9pn/Q2c+bM8cGzP+ycj/6Zr1/yVRs3brR2zRqT9l+wwHlf+Lzpxs77G+u/dIFJfS+Ya+DD+xGjHhca4f+FAzS6ixYtut1WlFLm4fxSylk555WllMPxXFMOxa3+HWknY0gmREjPmWHW+w7z6Hm/9MjJ7zB7dEzfaaf44NkfNnfuXP/1v5zrgfvv1zMwOOhNb/lDZ3/szy1YsMCE9ett/Og5Hj3vUybNfOtBBt67L+0u0fX/yYEa97bbbVuxAP+AeTgaK3EmKlPeu3Hjxu8NDAzYAedhD1NeiSX4NO63dXvh4xr34K9NWWtcm46oQ09KSdRhxsmz7TF0uLWf+IVH3vUO/Rd+xeA73+rk17/eye881a233KLdbtt7n30MDg7qibvuMnbJ/7L2Q59Td2/R09prN7t/7EDtxbuhg0QEKemJCCklEaEn+c0opczHgMYdtm6hxjrcVErJOEajixbmLV++/LSc8xc9RTnnn9qklLIQv4uEU/GenPNttlBKmW/K+pzz/7GFttgoaUSdpBSiTton9pvzO0d47ILVNnzrChuXXcEpAwZe8XLzDz1ImjWLbte6O+8x+qOfGfvlv5k048g9zDplnnYeEFWFET1RJymFqJNJEaakym/IC0253ZRX2dwavAfr8d9M+Sjeh/k4qZTy/Zzz9XbQ4sWLly9duvRivAn74h9LKWfmnG/wFLVTjAmVnqRLtCRdPenAlll/sadZZ+xpdNkGo9evNbbsX4z+y4gagUpb++gBu504V9/zZ2q/YECaa0Ido0QQSU9KIeokpdBooYuWCdG1q5VS9sB7TPmZKbNNWYX3Yw0uwByNy3POV5RSEs7FDHymlPKOnPNtdkBVVXLOnyql3IWzsAf+ppRyVs55uSktT6Kt1X5Y97E5xkXUUqpE1DYzj77XVvpfO6Q2pNKoUaHWqLTURlTR8rgwJbqSFtHVU6NCrVG15/oNeC+GNH66ZMmSfzXly3gzrsfHFi9evHbp0qX/E/M1foVPGZdz/tdSyh/gKOyBv8Rb7ISc88WllA7Oxmo8UEo5HeuwDkeZ8pitaOs+/HN15zjjqtQSdVeVWnoiulJqieiakFpSdEktPSm6pJYUXT2BhLB9qtQS0VWllp6YeYRkl5uhUeOvU0om5ZzXlVJOzzmvMOUnOBTr8N6c8yOmfBRfwp64yC6Qc/56KaWL5TnnVaWU12IvT3S1rWgn6y+gPs64qLtSaom6a0KqRV2Raj0RJkSYkPSJGJP06QlJEkLSk4SQJKEnjEn6hDE9ETMwKmKGnmrOa+1qOeePlVLuw+yc8022kHNeYXOfxUKck3NeYZqc8/2llP+EN+acv2sXyTn/b1N+jP9oSuAGfNcWUkradn/kgnjEu/Fc4yI8LgWBFLYqbJAQNpgQREKYEAlBJI0g0gZCI20gkDZIs17AnicmO+8y/ETjVuNyzn/b7XZtj5zzulLKm3LOj9mKnPP1EXG9bbsTZ2is89R9Hl835Y6c8wO2kFLSk4yLG4mNro1wrF0oJSJIyYQIUiLC5gafrTr88qRvf7/15FJKJrWM+8Tfcs4Xz7kg3VtW1K32zFQN7CfGZggkhEZCIGkEEsK2hSlhQpLomy/t9jvS/LNVB34hae3pt55cSsl0/xfg6dwDA9YivwAAAABJRU5ErkJggg==';
+
+    /* 覆盖层落位:offsetLeft/Top 相对 offsetParent —— 手机档 header 被我们置 static
+       (锚是 .bg-card),平板档 header 是站点自己的 absolute(锚是 header),两种坐标系里
+       span 都挂在 host 下、与 img 同一锚,天然对齐。
+       每次扫描都要重钉:手机档卡片是 w-full,img 的居中位置随视口变(实测转屏后
+       覆盖层偏 94px,而"span 已存在就 return"的写法永远不会纠正它)。
+       签名比对避免每 200ms 重写同样的 inline style。返回 false = 还没布局好。 */
+    function placePassportLogo(img, span) {
+      var r = img.getBoundingClientRect();
+      if (r.width < 10 || r.height < 5) return false;
+      var bw = Math.round(r.width), bh = Math.round(r.height);
+      var sig = img.offsetLeft + ',' + img.offsetTop + ',' + bw + 'x' + bh;
+      if (span.__bwAt === sig) return true;
+      span.__bwAt = sig;
+      span.style.left = img.offsetLeft + 'px';
+      span.style.top = img.offsetTop + 'px';
+      span.style.width = (bw * 6) + 'px';
+      span.style.height = (bh * 6) + 'px';
+      return true;
+    }
+
+    /* 登录页渲染完之后就再没有 DOM 变更了,观察器/resize 都不会再触发重扫。
+       首扫常常赶在 img 布局之前(实测平板首启:覆盖层停在 0x0 一整轮),
+       所以没落位就自己催一次,最多 6s,页面真没布局好就不空转。 */
+    var placeRetries = 0;
+    function retryPlace() {
+      if (placeRetries++ > 30) return;
+      setTimeout(scheduleScan, 200);
+    }
+
+    function fixPassportLogo(img) {
+      var hit = false;
+      try { hit = img.matches('div.bg-card > div[class*="top-10"] img'); } catch (e) { /* ignore */ }
+      if (!hit) return;
+      var host = img.parentElement;
+      if (!host) return;
+      var span = document.getElementById('bw-dark-passport-logo');
+      if (!span) {
+        span = document.createElement('span');
+        span.id = 'bw-dark-passport-logo';
+        /* **布局盒必须放大到 6 倍再用 transform 缩回**:算法加深是否反相一张图,
+           判据是它的显示尺寸(设备 px),而门槛随 dpr/WebView 版本漂移(实测 105~158)。
+           这颗站标 62 CSS px:手机 dpr2.625 = 163 设备 px 在门槛之上(正常),
+           平板 dpr2 = 124 设备 px 落在门槛之下 —— 覆盖层自己也被反相(黄底压暗、
+           眼白与瞳孔对调、"微博"字从 191 压成 117),表现为"平板深色 logo 仍不正常"。
+           放大 6 倍后布局盒 372x120 CSS(平板 744 设备 px)远离门槛,transform 只改
+           视觉尺寸、不参与加深判定,实测逐像素还原(1017/1088 与源图一致)。 */
+        span.style.cssText = 'position:absolute;transform:scale(.16666667);transform-origin:0 0;' +
+          'background:url("' + PASSPORT_LOGO_DARK + '") no-repeat center / contain;' +
+          'pointer-events:none;z-index:1;';
+        host.appendChild(span);
+        // 原图隐掉:src 留着(Vue 要回写随它),opacity 是 inline style,站点没绑这个属性
+        img.style.opacity = '0';
+      } else if (span.parentElement !== host) {
+        host.appendChild(span); // 宿主被 Vue 整块重建过
+      }
+      if (!placePassportLogo(img, span)) retryPlace();
+    }
+
     var timer = null;
     function scheduleScan() {
       if (timer) return;
@@ -180,7 +258,7 @@
         timer = null;
         try {
           var imgs = document.images;
-          for (var i = 0; i < imgs.length; i++) { fixImg(imgs[i]); fixAvatarImg(imgs[i]); }
+          for (var i = 0; i < imgs.length; i++) { fixImg(imgs[i]); fixAvatarImg(imgs[i]); fixPassportLogo(imgs[i]); }
           // CSS 背景图只可能是叶子节点(如未登录页 logo),避免全量 getComputedStyle
           var leaves = document.querySelectorAll('i,span,div,a,em');
           for (var j = 0; j < leaves.length; j++) {
@@ -194,12 +272,29 @@
 
 
     try {
-      new MutationObserver(scheduleScan).observe(document.documentElement, {
+      new MutationObserver(function () {
+        // 登录页站标覆盖层:缺失时即时补,不等 200ms 防抖 —— 否则每次切回账密视图,
+        // 新挂载的 logo 会空一拍(预隐藏已把它藏了,覆盖层晚到就是空白)。
+        // 位置漂移交给 scheduleScan 里的重钉(每次求值要读矩形,不放这条热路径)
+        try {
+          if (!document.getElementById('bw-dark-passport-logo')) {
+            var pim = document.querySelector('div.bg-card > div[class*="top-10"] img');
+            if (pim) fixPassportLogo(pim);
+          }
+        } catch (e) { /* ignore */ }
+        scheduleScan();
+      }).observe(document.documentElement, {
         childList: true,
         subtree: true,
         attributes: true,
         attributeFilter: ['src', 'style']
       });
+    } catch (e) { /* ignore */ }
+
+    /* 转屏/分屏只改布局、不产生 DOM 变更,观察器不会因此重扫 —— 单独挂 resize
+       让覆盖层跟上(实测视口 411→320 时 img 左移 46px，覆盖层原地不动) */
+    try {
+      window.addEventListener('resize', scheduleScan, true);
     } catch (e) { /* ignore */ }
 
     try {
@@ -294,6 +389,15 @@
            改成只降明度、不动色相:brightness(.78) → 245*.78=191(与正文同档),
            蓝点 124,163,244 → 97,127,190 仍是蓝的。 */
         '#app .main-wrap .lite-topbar .nav-left{filter:brightness(.78) !important;}' +
+        /* 登录页(passport)站标:深色版由上方 fixPassportLogo 的覆盖层(background-image)
+           绘制 —— invert 滤镜会被算法加深"反反相"撤销、换 src 会被 Vue 回写/再反相,
+           两条路都实测走不通。这条规则负责**首帧预隐藏**:覆盖层要等扫描周期才落地,
+           不预隐藏的话每次进登录页都先闪一下原图(黄底图标 + 近黑字压深底)。
+           img 被隐藏后布局尺寸不变,覆盖层按 img 的 offsetLeft/Top 精确落位。
+           注意:本注释块**不能以"注释结束符 + 加号"收尾** —— 那样字符串拼接里的第二个
+           加号会被解析成一元正号,字符串取正得 NaN,拼进 CSS 就是字面量 "NaN",
+           整条规则静默消失(语法合法,node --check 查不出)。 */
+        'div.bg-card > div[class*="top-10"] img{opacity:0 !important;}' +
         'html.bw-deep #app .lite-page-wrap .lite-page-tab{border-bottom:0 !important;}' +
         '.comment-content .lite-line{border-top:0 !important;}' +
         /* 站点在列表行上写了 **透明** 的 1px 边框(私信行 .lite-li、右侧栏 .lite-line,
@@ -316,5 +420,19 @@
     } catch (e) { /* ignore */ }
   }
 
+  /* DOM 已在(正常的 onPageFinished 注入/重注入):立即跑。
+     不在(onPageStarted):observe document,html 一出现立即 boot;
+     readystatechange 兜底(极端情况下 observer 建失败的退路)。 */
+  if (document.documentElement) {
+    boot();
+  } else {
+    try {
+      var mo = new MutationObserver(function () {
+        if (document.documentElement) { mo.disconnect(); boot(); }
+      });
+      mo.observe(document, { childList: true });
+    } catch (e) { /* ignore */ }
+    document.addEventListener('readystatechange', function () { boot(); });
+  }
   if (window.__bwDarkScan) window.__bwDarkScan();
 })();

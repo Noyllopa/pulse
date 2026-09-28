@@ -6,6 +6,7 @@ import android.content.ClipboardManager;
 import android.content.ClipData;
 import android.view.ContextMenu;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -15,6 +16,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.view.View;
 import android.view.ViewGroup;
@@ -49,6 +51,8 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewFeature;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -99,15 +103,26 @@ public class MainActivity extends AppCompatActivity {
     private SwipeRefreshLayout swipeRefresh;
     /** 网页 nav.js 报上来的分组弹层展开状态,只在展开期间禁掉下拉刷新 */
     private boolean groupDropOpen = false;
+    /** 站点看图器(.pswp 浮层,不产生历史记录)是否开着 —— 返回键要先关它 */
+    private boolean galleryOpen = false;
+    /** 撰写/转发/讨论这类编辑页:整页不滚文档,下拉刷新要交还手势(见 syncRefreshGesture) */
+    private boolean editorOpen = false;
     private ProgressBar progressBar;
     private View errorView;
     private ValueCallback<Uri[]> filePathCallback;
     private String darkFixJs;
     private String seekJs;
+    private String mediaJs;
     private String themeJs;
     private String navJs;
     private FrameLayout fullscreenContainer;
     private WebChromeClient.CustomViewCallback fullscreenCallback;
+    // 进全屏前应用要的方向,退出时按它还原(不写死 UNSPECIFIED,免得盖掉以后可能加的锁定)
+    private int preFullscreenOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+    // 最近一次被按到的那条片子的真实比例,全屏方向按它定(见 NativeBridge#setVideoAspect)
+    private int lastVideoW;
+    private int lastVideoH;
+    private long lastVideoAt;
     private boolean loginSkipped;
     private boolean loginCorrected;
 
@@ -118,14 +133,53 @@ public class MainActivity extends AppCompatActivity {
                 if (callback == null) {
                     return;
                 }
-                Uri[] uris = WebChromeClient.FileChooserParams.parseResult(
-                        result.getResultCode(), result.getData());
-                callback.onReceiveValue(uris == null ? new Uri[0] : uris);
+                Uri[] uris = pickedUris(result.getResultCode(), result.getData());
+                if (uris == null) {
+                    // 取消要回 null —— 文档语义是"什么都没发生"。
+                    // 回空数组会被站点当成"选到了 0 张图",撰写页因此弹"图片选择失败"。
+                    callback.onReceiveValue(null);
+                    return;
+                }
+                callback.onReceiveValue(uris);
             });
 
+    /**
+     * 自己解析选图结果,不走 {@code FileChooserParams.parseResult}。
+     *
+     * 实测(模拟器 + 系统媒体选择器):结果是 RESULT_OK,但 URI 只挂在 ClipData 上,
+     * {@code Intent.getData()} 为 null,这种组合下 parseResult 给出 0 个文件 ——
+     * 网页 input.files 空,撰写页就没有预览。自己收 ClipData 后单张、三张都通。
+     */
+    private static Uri[] pickedUris(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null) {
+            return null;
+        }
+        ClipData clip = data.getClipData();
+        if (clip != null) {
+            int n = 0;
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                if (clip.getItemAt(i).getUri() != null) {
+                    n++;
+                }
+            }
+            if (n > 0) {
+                Uri[] uris = new Uri[n];
+                int k = 0;
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri u = clip.getItemAt(i).getUri();
+                    if (u != null) {
+                        uris[k++] = u;
+                    }
+                }
+                return uris;
+            }
+        }
+        Uri single = data.getData();
+        return single == null ? null : new Uri[]{single};
+    }
+
     /** 分区存储之前(≤28)存公共目录要先拿写权限,批准后补存这一张 */
-    private String[] pendingDownload;
-    private final ActivityResultLauncher<String> permissionLauncher =
+    private String[] pendingDownload;    private final ActivityResultLauncher<String> permissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
                 String[] job = pendingDownload;
                 pendingDownload = null;
@@ -154,6 +208,15 @@ public class MainActivity extends AppCompatActivity {
         if (v != webView) {
             return;
         }
+        /**
+         * 缩略图状态（不在全屏看图里）长按一律不给下载菜单 —— 信息流卡上的图/视频/live 图
+         * 长按想要的是"放大看/重播/倍速"，弹一层"保存"等于把误触当成确认；而且视频与
+         * live 图在卡片里就是一张 <video>，命中测试给不出直链，菜单本来也只能存个封面。
+         * 只有看图浮层里（galleryOpen 由 nav.js 报上来）才保留这条：那才是"我要存下来"。
+         */
+        if (!galleryOpen) {
+            return;
+        }
         WebView.HitTestResult hit = webView.getHitTestResult();
         if (hit == null) {
             return;
@@ -178,11 +241,34 @@ public class MainActivity extends AppCompatActivity {
         }
         menu.add(0, MENU_COPY_URL, 1, R.string.menu_copy_image_url)
                 .setOnMenuItemClickListener(item -> {
-                    getSystemService(ClipboardManager.class)
-                            .setPrimaryClip(ClipData.newPlainText("pulse", url));
-                    Toast.makeText(this, R.string.menu_copied, Toast.LENGTH_SHORT).show();
+                    copyUrl(url);
                     return true;
                 });
+    }
+
+    private void copyUrl(String url) {
+        getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("pulse", url));
+        Toast.makeText(this, R.string.menu_copied, Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * 看图器里长按 live 图:给一个菜单,而不是直接落盘。
+     *
+     * live 图是一张 &lt;video&gt;,WebView 的命中测试给不出可用的类型
+     * (IMAGE_TYPE 拿不到播放直链),所以直链由 media_save.js 报上来;
+     * 菜单项与图片那条长按菜单同一套词汇(下载 / 复制地址)。
+     */
+    private void showMediaMenu(String url) {
+        CharSequence[] items = {getString(R.string.menu_save_media), getString(R.string.menu_copy_image_url)};
+        new MaterialAlertDialogBuilder(this)
+                .setItems(items, (dialog, which) -> {
+                    if (which == 0) {
+                        saveMediaUrl(url);
+                    } else {
+                        copyUrl(url);
+                    }
+                })
+                .show();
     }
 
     private static String guessType(String url) {
@@ -281,7 +367,15 @@ public class MainActivity extends AppCompatActivity {
      * 两个条件取与:离开弹层时不能把 /message/chat 那条规则一起放开。
      */
     private void syncRefreshGesture() {
-        swipeRefresh.setEnabled(!isInnerScrollerPage(webView.getUrl()) && !groupDropOpen);
+        // 看图浮层开着时也不给下拉:它盖住整屏,往下拽是在拽图片,不是要刷新
+        // 编辑页(/compose 及其转发/讨论变体)同理:文档不滚,滚的是卡片自己
+        swipeRefresh.setEnabled(!isInnerScrollerPage(webView.getUrl()) && !isEditorPage(webView.getUrl())
+                && !groupDropOpen && !galleryOpen && !editorOpen);
+    }
+
+    /** 撰写页整页是 .m-main 那种固定列,文档永远停在 y=0 —— 下拉手势必然命中刷新 */
+    private static boolean isEditorPage(String url) {
+        return url != null && url.contains("/compose");
     }
 
     /** 通过会话 Cookie(MLOGIN=1 / SUB)判断微博登录态 */
@@ -399,6 +493,32 @@ public class MainActivity extends AppCompatActivity {
         enqueueDownload(url, name, type, dir);
     }
 
+    /**
+     * 看图器里的视频 / live 图存盘。
+     *
+     * live 图的直链形如 {@code video.weibo.com/media/play?livephoto=<编码后的 .mov>},
+     * 路径本身没有扩展名,所以文件名与 MIME 都按里层那条推,再交给现成的存盘通道。
+     */
+    private void saveMediaUrl(String url) {
+        if (TextUtils.isEmpty(url) || !url.startsWith("http")) {
+            Toast.makeText(this, R.string.download_unsupported, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        int i = url.indexOf("livephoto=");
+        String src = i >= 0 ? Uri.decode(url.substring(i + "livephoto=".length())) : url;
+        String name = Uri.parse(src).getLastPathSegment();
+        String ext = MimeTypeMap.getFileExtensionFromUrl(src);
+        String mime = TextUtils.isEmpty(ext) ? null
+                : MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase(Locale.ROOT));
+        if (TextUtils.isEmpty(mime)) {
+            mime = "video/mp4";
+        }
+        if (TextUtils.isEmpty(name)) {
+            name = "pulse-" + System.currentTimeMillis();
+        }
+        saveWithDownloadManager(url, "attachment; filename=\"" + name + "\"", mime);
+    }
+
     private void enqueueDownload(String url, String name, String mimeType, String dir) {
         DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
         req.setTitle(name);
@@ -513,7 +633,7 @@ public class MainActivity extends AppCompatActivity {
                 progressBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
             }
 
-            /** 网页视频全屏:交给原生容器渲染 */
+            /** 网页视频全屏:交给原生容器渲染,并把方向要成横屏 */
             @Override
             public void onShowCustomView(View view, CustomViewCallback callback) {
                 if (fullscreenContainer != null) {
@@ -532,6 +652,11 @@ public class MainActivity extends AppCompatActivity {
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT));
                 fullscreenCallback = callback;
+                // 网页只会 requestFullscreen,横不横屏归容器管:不主动要方向的话,
+                // 视频只是铺满竖屏(实测接管后 screen.orientation 仍是 portrait-primary)。
+                // SENSOR_* 而不是 *_PORTRAIT/LANDSCAPE 单值:同侧两个朝向都跟着传感器走。
+                preFullscreenOrientation = getRequestedOrientation();
+                setRequestedOrientation(fullscreenOrientation());
                 getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView())
                         .hide(WindowInsetsCompat.Type.systemBars());
@@ -633,6 +758,12 @@ public class MainActivity extends AppCompatActivity {
         if (!seekJs.isEmpty()) {
             view.evaluateJavascript(seekJs, null);
         }
+        if (mediaJs == null) {
+            mediaJs = readAsset("media_save.js");
+        }
+        if (!mediaJs.isEmpty()) {
+            view.evaluateJavascript(mediaJs, null);
+        }
     }
 
     private String readAsset(String name) {
@@ -657,6 +788,7 @@ public class MainActivity extends AppCompatActivity {
         ViewGroup decor = (ViewGroup) getWindow().getDecorView();
         decor.removeView(fullscreenContainer);
         fullscreenContainer = null;
+        setRequestedOrientation(preFullscreenOrientation);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView())
                 .show(WindowInsetsCompat.Type.systemBars());
@@ -666,12 +798,57 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 全屏要哪个方向:横屏视频转横屏,竖屏视频留竖屏。
+     *
+     * 比例只能由网页报上来 —— onShowCustomView 那一刻原生侧看不到视频尺寸
+     * (实测容器树就一个 FrameLayout[0x0] 加一个混淆的渲染视图,VideoView 那套
+     * getVideoWidth 在这里既没有也不公开),而 swipe_seek.js 在按到播放器时就把
+     * `videoWidth/videoHeight` 递了过来。判不出来仍按老行为走横屏。
+     */
+    private int fullscreenOrientation() {
+        if (lastVideoW > 0 && lastVideoH > 0
+                && SystemClock.uptimeMillis() - lastVideoAt < 10_000) {
+            return lastVideoW >= lastVideoH
+                    ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    : ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+        }
+        return ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+    }
+
     /** 提供给网页 JS 的原生能力桥 */
     private class NativeBridge {
 
         @JavascriptInterface
         public void toast(String message) {
             runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show());
+        }
+
+        /**
+         * 全屏看图里长按 live 图:弹下载菜单。
+         *
+         * 平台的命中测试没有媒体类型(只有 IMAGE/ANCHOR 那几类),`<video>` 上的长按原生看不见,
+         * 只能由 media_save.js 把直链报上来。报上来之后**不直接落盘** ——
+         * 2026-09-28 用户要求:长按给的是菜单,和长按图片那条一致;
+         * 直接存等于把手势当确认,误触一次相册里就多一条片子。
+         * (看图器里的真视频长按不下菜单,改由页面自己切倍速 —— 同一条要求。)
+         */
+        @JavascriptInterface
+        public void mediaMenu(final String url) {
+            runOnUiThread(() -> showMediaMenu(url));
+        }
+
+        /**
+         * 播放器被按到的那一刻,把它那条片子的真实比例报上来,给全屏定方向。
+         *
+         * 在 JS 线程回调,这里只写三个字段(不碰 UI);读侧 fullscreenOrientation 最坏
+         * 读到一次旧值,下次全屏就对了,不值得为它加锁。
+         */
+        @JavascriptInterface
+        public void setVideoAspect(int w, int h) {
+            lastVideoW = Math.max(0, w);
+            lastVideoH = Math.max(0, h);
+            lastVideoAt = SystemClock.uptimeMillis();
         }
 
         /** 页面脚本查到服务端登录态为"未登录"时回调,由原生决定跳登录页 */
@@ -691,6 +868,35 @@ public class MainActivity extends AppCompatActivity {
                 syncRefreshGesture();
             });
         }
+
+        /**
+         * 站点看图浮层(.pswp)的开/合。它不产生历史记录,所以系统返回手势必须被原生
+         * 截下来交给页面关它,否则会直接跳出撰写页/信息流。
+         */
+        @JavascriptInterface
+        public void setGalleryOpen(final boolean open) {
+            runOnUiThread(() -> {
+                if (galleryOpen == open) {
+                    return;
+                }
+                galleryOpen = open;
+                syncRefreshGesture();
+            });
+        }
+        /**
+         * 撰写/转发/讨论这类编辑页的开/合。SPA 换路由不会重走 onPageStarted,
+         * 原生自己看不到 URL 变化,所以由页面脚本按路由报过来(与 setGalleryOpen 同一条路子)。
+         */
+        @JavascriptInterface
+        public void setEditorOpen(final boolean open) {
+            runOnUiThread(() -> {
+                if (editorOpen == open) {
+                    return;
+                }
+                editorOpen = open;
+                syncRefreshGesture();
+            });
+        }
     }
 
     private void configureBackNavigation() {
@@ -699,6 +905,10 @@ public class MainActivity extends AppCompatActivity {
             public void handleOnBackPressed() {
                 if (fullscreenContainer != null) {
                     exitFullscreen(); // 先退出全屏视频
+                } else if (galleryOpen) {
+                    // 看图器是 DOM 浮层、不产生历史记录:返回要先关它,不能直接离开这一页
+                    webView.evaluateJavascript(
+                            "try{window.__bwCloseGallery&&window.__bwCloseGallery()}catch(e){}", null);
                 } else if (webView.canGoBack()) {
                     webView.goBack();
                 } else if (isOnLoginPage()) {

@@ -81,10 +81,239 @@
     });
   }
 
+  /* 热搜结果页底部那条"和 N 人一起讨论"是站点的通栏 fixed 条,占掉屏幕底一条。
+     这里让它改由右下角那颗悬浮球承担:球本身在这页让出 pointer-events,
+     theme.js 把那条栏收成球大小的透明点击层垫在球下面 —— 用户那一记真点击
+     落在站点自己的节点上,落点(该话题页)与上下文都不需要我们复制。
+     (试过"藏掉栏 + 球去 .click()":这个控件对程序化 click 不响应,要真手势。)
+     判据用头像域名:讨论那半的图是本人头像(tvax*.sinaimg.cn),
+     "问智搜"那半是 simg.s.weibo.com 的运营图(已被 theme.js 收掉)。
+     只在 /search 与 /s/ 生效 —— 超话页同一条栏维持原样。 */
+  function searchDiscuss() {
+    if (!/(^\/search)|(^\/s\/)/.test(location.pathname)) return null;
+    var btns = document.querySelectorAll('.m-bar-panel .m-diy-btn');
+    for (var i = 0; i < btns.length; i++) {
+      /* 只看结构,不看可见性 —— 这条栏正是被我们用 display:none 收掉的,
+         按可见性判会自我拆台(球接管后判不到 → 类被摘掉 → 栏又冒出来)。
+         点击不需要元素可见:站点自己那条 .lite-iconf-releas 也是 0x0 的隐藏节点 */
+      if (btns[i].querySelector('img[src*="sinaimg.cn"]')) return btns[i];
+    }
+    return null;
+  }
+
   var OFF_PAGE_URL = {
     search: 'https://m.weibo.cn/search?containerid=231583',
     msg: 'https://m.weibo.cn/message'
   };
+
+  /* 撰写页的图标:站点用的是自家 iconfont(wb440),笔画与全站悬浮件那套线性 SVG
+     (24 格 / 1.8 描边 / 圆头,与发博球的铅笔同源)不是一套。这里只往站点已有的按钮里
+     **追加**一个 svg 并打 data-bw-ico(字形由 theme.js 用 ::before{content:none} 关掉),
+     不搬节点、不改结构、不碰点击 —— Vue 之后重渲染也不会跟我们抢 DOM。
+     注意:站点会在同一颗控件上换 class —— 表情面板展开时 `lite-iconf-emote`→`lite-iconf-edit`,
+     可见性循环时 `iconf_compose_earth`→`heart`→`lock`。所以这些状态都要各配一枚图形,
+     且要按"当前命中的 class"重画(见 paintComposeIcons 里的 key 判定),否则会停在旧图标。 */
+  var COMPOSE_ICONS = {
+    'lite-iconf-pic': '<rect x="3" y="4.5" width="18" height="15" rx="3"></rect>' +
+      '<circle cx="8.6" cy="9.8" r="1.7"></circle><path d="M21 15.3l-4.7-4.5-9.6 8.9"></path>',
+    'lite-iconf-emote': '<circle cx="12" cy="12" r="8.6"></circle>' +
+      '<path d="M8.7 14.1a4.3 4.3 0 0 0 6.6 0"></path><path d="M9.3 9.9h.01M14.7 9.9h.01"></path>',
+    'lite-iconf-edit': '<rect x="2.6" y="6.6" width="18.8" height="10.8" rx="2.6"></rect>' +
+      '<path d="M6.4 10.2h.01M9.6 10.2h.01M12.8 10.2h.01M16 10.2h.01' +
+      'M6.4 13.4h.01M9.6 13.4h.01M12.8 13.4h.01M16 13.4h.01"></path>' +
+      '<path d="M8.4 15.6h7.2"></path>',
+    'iconf_compose_earth': '<circle cx="12" cy="12" r="8.6"></circle>' +
+      '<path d="M3.4 12h17.2"></path><path d="M12 3.4c2.5 2.6 2.5 14.6 0 17.2M12 3.4c-2.5 2.6-2.5 14.6 0 17.2"></path>',
+    'iconf_compose_heart': '<path d="M12 20.1l-6.8-6.6a4.6 4.6 0 0 1 6.4-6.6l.4.4.4-.4a4.6 4.6 0 0 1 6.4 6.6z"></path>',
+    'iconf_compose_lock': '<rect x="4.6" y="10.6" width="14.8" height="9.4" rx="2.6"></rect>' +
+      '<path d="M8.2 10.6V8.4a3.8 3.8 0 0 1 7.6 0v2.2"></path>'
+  };
+
+  /* 只画撰写页(.m-main)那一排。原来按类名全文档扫,私信会话页底部的
+     <i class="lite-iconf-pic/_emote"> 也被扫到 —— 那两颗的站点字形是画在 i 自己的
+     ::before 上,而 theme.js 关字形的规则只罩 h4[data-bw-ico]::before,于是我们的 svg
+     与站点的字形并排出现(用户报"表情与图片图标重复")。会话页那两颗归站点自己画。 */
+  function paintComposeIcons() {
+    for (var k in COMPOSE_ICONS) {
+      if (!Object.prototype.hasOwnProperty.call(COMPOSE_ICONS, k)) continue;
+      var list = document.querySelectorAll('.m-main .' + k);
+      for (var i = 0; i < list.length; i++) {
+        var el = list[i];
+        /* 一颗控件可能同时命中多个 key 的历史残留,取它 class 上当前真正有的那一个 */
+        var key = '';
+        for (var j = 0; j < el.classList.length; j++) {
+          if (Object.prototype.hasOwnProperty.call(COMPOSE_ICONS, el.classList[j])) { key = el.classList[j]; break; }
+        }
+        if (key !== k || el.getAttribute('data-bw-ico') === key) continue;
+        el.setAttribute('data-bw-ico', key);
+        var box = el.querySelector('.bw-ico:not(.bw-caret)');
+        if (!box) {
+          box = document.createElement('span');
+          box.className = 'bw-ico';
+          el.insertBefore(box, el.firstChild);
+        }
+        box.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+          'stroke-linecap="round" stroke-linejoin="round">' + COMPOSE_ICONS[key] + '</svg>';
+      }
+    }
+  }
+
+  /* 站点换按钮语义时只改 class(表情⇄键盘、地球⇄心⇄锁),不改节点 ——
+     主观察器只看 childList,这类变化不会触发 refresh,图标就会停在旧的那枚
+     (实测切到"好友圈"仍是地球)。所以给撰写页单独挂一个只看 class 属性的观察器。
+     只监听 attributeFilter:class,我们自己写的 data-bw-ico 不会反过来触发它。 */
+  var icoObs = null;
+  function watchComposeIcons() {
+    var host = document.querySelector('.m-main');
+    if (!host || (icoObs && icoObs.__el === host)) return;
+    try {
+      if (icoObs) icoObs.disconnect();
+      icoObs = new MutationObserver(function () {
+        try { paintComposeIcons(); paintComposeCaret(); } catch (e) { /* ignore */ }
+      });
+      icoObs.observe(host, {attributes: true, subtree: true, attributeFilter: ['class']});
+      icoObs.__el = host;
+    } catch (e) { icoObs = null; }
+  }
+
+  /* 站点让输入框自增靠的是一面克隆 textarea(absolute + z-index:-9999 + visibility:hidden),
+     它读克隆的 scrollHeight 再写回可见那颗的 height。问题是克隆是绝对定位的,
+     宽度落到整行(实测 391)而不是可见那颗的 311 —— 同样一段字在克隆里少绕几行,
+     报回来的数就偏小,输入框比自己的内容矮一截(实测内容 206、框 177),字被吃掉一行。
+     把克隆的宽度钉成可见那颗的宽度,量出来的高度才是真的。 */
+  function syncComposeMirror() {
+    var all = document.querySelectorAll('.m-wz-def textarea');
+    if (all.length < 2) return;
+    var vis = null, mir = null;
+    for (var i = 0; i < all.length; i++) {
+      if (getComputedStyle(all[i]).zIndex === '-9999') mir = all[i]; else vis = all[i];
+    }
+    if (!vis || !mir) return;
+    var w = Math.round(vis.getBoundingClientRect().width);
+    if (w > 10 && mir.style.width !== w + 'px') mir.style.width = w + 'px';
+  }
+
+  /* 撰写页点缩略图看大图:站点那条路被 `if (this.isPCPlatform)` 挡死(那颗 computed 读
+     navigator.platform 与 ontouchstart),而它要发的 mvGallery 挂在一条独立的事件总线上 ——
+     不在组件树里,实测从 self/parent/root 逐个 $emit 都没人接。所以只把这一颗组件实例上的
+     isPCPlatform 顶成 true,站点自己的 @click 就通了,不另造看图层。
+     副作用只有 addPhoto 里那句 `isPCPlatform || URL.revokeObjectURL(src)`:blob 不被提前
+     回收 —— 正好让放大那张有源可取(实测 slide 用的是上传回来的 CDN 直链)。 */
+  function allowComposeThumbnails() {
+    var host = document.querySelector('.image-list');
+    if (!host) return;
+    var v = null, n = host;
+    while (n && !v) { v = n.__vue__; n = n.parentElement; }
+    if (!v || v.__bwPc) return;
+    try {
+      Object.defineProperty(v, 'isPCPlatform',
+        {configurable: true, get: function () { return true }});
+      v.__bwPc = true;
+    } catch (e) { /* ignore */ }
+  }
+
+  function closeGallery() {
+    var b = document.querySelector('.pswp__button--close');
+    if (b) { b.click(); return; }
+    var p = document.querySelector('.pswp');
+    if (p) p.style.display = 'none';
+  }
+  /* 看图浮层不产生历史记录,原生返回回调开着它时要先关浮层,否则会直接跳出这一页 */
+  window.__bwCloseGallery = closeGallery;
+
+  /* .pswp 那颗节点是常驻的(收起只是 display:none),所以盯它自己:
+     class/style 一变就同步一次状态,不等 refresh 的 250ms 防抖。 */
+  var pswpObs = null;
+  function syncGalleryOverlay() {
+    var open = pswpOpen();
+    if (window.BwNative && window.BwNative.setGalleryOpen) {
+      try { window.BwNative.setGalleryOpen(open); } catch (e) { /* ignore */ }
+    }
+    var p = document.querySelector('.pswp');
+    if (!p) {
+      if (pswpObs) { try { pswpObs.disconnect(); } catch (e) { /* ignore */ } pswpObs = null; }
+      return;
+    }
+    if (!pswpObs) {
+      try {
+        pswpObs = new MutationObserver(function () { syncGalleryOverlay(); });
+        pswpObs.observe(p, {attributes: true, childList: true, subtree: true,
+          attributeFilter: ['class', 'style']});
+      } catch (e) { pswpObs = null; }
+    }
+    /* 左上角返回胶囊:站点自己的关闭键在右上,这条补的是"左上角也能退"。
+       只在撰写页放 —— 信息流看图没这个要求,不去改它既有的样子。 */
+    var chip = p.querySelector('.bw-pswp-back');
+    var want = open && !!document.querySelector('.m-reles-top');
+    if (want && !chip) {
+      chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'bw-pswp-back';
+      chip.setAttribute('aria-label', '返回');
+      chip.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+        'stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"></path></svg>';
+      chip.addEventListener('click', closeGallery);
+      p.appendChild(chip);
+    } else if (!want && chip) {
+      chip.remove();
+    }
+  }
+
+  /* 编辑卡按规则铺到功能区上方之后,卡里有一大块是空白,而站点只在 textarea 那一小截
+     上响应点击 —— 空白处点了没反应会像坏了。补一条:点在卡里的非交互区域就把光标交给输入框。 */
+  function watchComposeFocus() {
+    var card = document.querySelector('.m-reles-nr');
+    if (!card || card.__bwFocusBound) return;
+    card.__bwFocusBound = true;
+    card.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.closest || t.closest('a,button,input,label,textarea,.bw-avatar')) return;
+      var ta = document.querySelector('.m-reles-con textarea');
+      if (ta && document.activeElement !== ta) {
+        try { ta.focus(); } catch (err) { /* ignore */ }
+      }
+    });
+    /* 输入时先在捕获阶段把克隆那颗的宽度钉好 —— 站点的自增就在这次 input 里量,
+       等不到下一次 refresh */
+    card.addEventListener('input', function () { syncComposeMirror(); }, true);
+  }
+
+  /* 站点给的"公开"只有一个地球图标 + 两个字,读起来像两件东西、也不知道能点。
+     在字样后面补一枚矢量下拉箭头,让"地球 + 公开 + ▾"读成一个可见性选择器。 */
+  function paintComposeCaret() {
+    var list = document.querySelectorAll('.m-fcb-col .visible h4');
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].querySelector('.bw-caret')) continue;
+      var box = document.createElement('span');
+      box.className = 'bw-ico bw-caret';
+      box.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+        'stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 9.8 12 15.2l5.6-5.4"></path></svg>';
+      list[i].appendChild(box);
+    }
+  }
+
+  /* 头像从顶栏搬进编辑卡左上角:不搬站点那个 <img>(它在 Vue 手里,搬走会和它的
+     重渲染抢 DOM),而是插一个我们自己的 img,src 每次刷新时从站点那颗同步。
+     外面再套一层我们自己的圆盒 —— 尺寸/圆角/外边距都挂在壳上,不挂在 img 上:
+     dark_fix.js 那条"圆形小头像躲反相"的兜底会把命中的 img 放大到 600% 再 scale 回来,
+     边距若留在 img 上会被一起推开(实测头像被顶出圆盒、下沿被裁,看着"不圆且显示不全");
+     壳与原图同尺寸时兜底只给壳补 overflow:hidden,不会再套第二层壳,位置就稳了。 */
+  function placeComposeAvatar() {
+    var card = document.querySelector('.m-reles-nr');
+    var src = document.querySelector('.m-ruser-img');
+    if (!card || !src || !src.src) return;
+    var box = card.querySelector('.bw-avatar');
+    if (!box) {
+      box = document.createElement('span');
+      box.className = 'bw-avatar';
+      var im = document.createElement('img');
+      im.alt = '';
+      box.appendChild(im);
+      card.insertBefore(box, card.firstChild);
+    }
+    var img = box.querySelector('img');
+    if (img && img.getAttribute('src') !== src.src) img.setAttribute('src', src.src);
+  }
 
   function profileUrl(c) {
     if (!c || !c.uid) return '';
@@ -530,12 +759,24 @@
     set.style.display = (!video && document.querySelector(SET_SEL)) ? 'flex' : 'none';
     // 手机端保留站点那条底栏(已改成横向悬浮),所以竖置操作栏只在平板出现
     acts.style.display = (wide && deep && !video && editor) ? 'flex' : 'none';
-    /* 正文页:返回球压在正文上、评论条压在评论区上,读帖子时一直挡着 ——
-       与首页那套悬浮件一样沿用上滑收起的锁存状态(下滑立刻放出)。
+    /* 读内容的页面(正文页 / 个人主页与博主主页 / 服务端直出的卡片页):左上返回球
+       一直压在正文上 —— 与首页那套悬浮件一样沿用上滑收起的锁存状态(下滑立刻放出)。
+       私信会话页不在名单里:那条页面唯一的出口就是这颗球,而且它本来也不滚。
        评论框展开时不能收:那是人正在打字,收掉等于把输入框从他手里抽走。 */
-    var chrome = hidden && deep && !document.documentElement.classList.contains('bw-editor-open');
+    var hcls = document.documentElement.classList;
+    var reading = deep || hcls.contains('bw-page-me') || hcls.contains('bw-cardpage');
+    var chrome = hidden && reading && !hcls.contains('bw-editor-open');
     fb.classList.toggle('bw-scroll-hide', chrome);
+    set.classList.toggle('bw-scroll-hide', chrome);
     if (editor) editor.classList.toggle('bw-scroll-hide', chrome);
+    /* 搜索/热搜条目页:下滑时收起左上返回钮与搜索框,让分类条自己顶到屏顶。
+       两个前提:这一页有搜索壳 .ntop-nav,也有分类条 .m-top-nav ——
+       没有分类条还收搜索框,人就再也改不了关键词了。
+       只在手机档为真(hidden 已被宽度过滤):平板档这一页没有常驻顶栏
+       (搜索壳不吸顶、分类条改左侧竖栏,见 theme.js 大屏段),没有要收的东西。 */
+    var collapse = hidden && hcls.contains('bw-page-search')
+      && !!document.querySelector('.ntop-nav') && !!document.querySelector('.m-top-nav');
+    hcls.toggle('bw-bar-collapse', collapse);
   }
 
   /* 站点会把搜索提示换成滚动的"大家都在搜：…",统一成一句朴素的占位 */
@@ -555,7 +796,40 @@
     }
   }
 
-  /* ===== 平板双列信息流:固定行位瀑布 + 双列口径记账 ===== */
+  /* 搜索页分组条:12 项 676px 装在 391px 内容列里,尾巴必然被圆角切一半。
+     站点自己那条 .scroll-box.nav_item 是 overflow-x:scroll(实测真手势能从 0 滑到 202,
+     点选时也会把选中项滚进视野 —— 0→173),所以**能滑**、只是**没有任何线索**。
+     这里只补两件事,不去平行造站已有的机制:
+     ① 按当前滑动位置给两端打 bw-tab-more-left / -right 标记,
+        theme.js 用 mask 把"还有内容"的那一端淡出(纯 alpha 合成,不参与加深的颜色映射);
+     ② 选中项因**非点击**的原因变化时(切页签后返回、深链落在靠后的分类)滚进视野。
+        只在选中项文字真的变了的那一次动手 —— 用户手动横滑浏览时绝不干预。 */
+  var tabStripSel = null;
+  function syncTabStrip(bar) {
+    var box = bar.querySelector('.scroll-box.nav_item') || bar;
+    var max = box.scrollWidth - box.clientWidth;
+    var x = box.scrollLeft;
+    bar.classList.toggle('bw-tab-more-left', x > 2);
+    bar.classList.toggle('bw-tab-more-right', x < max - 2);
+    if (!box.__bwTabScroll) {
+      box.__bwTabScroll = true;
+      try { box.addEventListener('scroll', function () { syncTabStrip(bar); }, { passive: true }); } catch (e) { /* ignore */ }
+    }
+    var cur = bar.querySelector('li.m-cur');
+    var key = cur ? (cur.textContent || '').trim() : '';
+    if (!key || key === tabStripSel) return;
+    tabStripSel = key;
+    if (!cur) return;
+    var cr = cur.getBoundingClientRect(), br = box.getBoundingClientRect();
+    if (cr.left >= br.left - 1 && cr.right <= br.right + 1) return;   // 已经看得见,别抢用户的滑动
+    box.scrollLeft = Math.max(0, Math.min(max,
+      x + (cr.left - br.left) - (br.width - cr.width) / 2));
+  }
+  function syncSearchTabStrip() {
+    var bar = document.querySelector('.m-top-nav');
+    if (bar) syncTabStrip(bar);
+  }
+
   /* CSS Grid 不支持 masonry(Chrome 145 实测),行轨切成 2px 细格、按卡片高度写
      span 等价于瀑布流,且完全不动 DOM 结构(站点的无限追加、事件代理都不受影响)。
 
@@ -684,6 +958,99 @@
     }
   }
 
+  /* ===== 滚动节拍接管:修"快速上划/下划时卡片消失,隔约半秒才回来" =====
+     逆向 main.b53719c4.js:站点把 window.onscroll 绑到 scrolling(),它有两处先天缺陷:
+     1) 节拍是 is_scrolling 闩 + setTimeout(300),而 scrollTop 在**监听入口**捕获、
+        300ms 后才在节拍里使用 —— 硬甩一拍差出 1000~2000px;换向后的第一拍更是整拍
+        浪费(手里的 s 还是旧方向深处的位置,算出的 a≈0 什么都不做),第二拍(再 300ms)
+        才真正补插。视口在这 ~600ms 里冲出窗口,上/下部露出整段空白,停手后还要再等
+        一拍才追平 —— 与用户报的"卡片消失隔约半秒"逐帧对上(screencast 实测空洞 0.4s+)。
+     2) 下行分支要求 wb_list_top 与 wb_list_bottom 都非空才动账,否则整拍静默跳过。
+     修法:接管 vm.scrolling —— 账目分支逐行照抄站点(同一批助手 get_scroll_items /
+     get_wb_hei / get_item_H / load_more,含 s===0、padding_top=0 的特殊分支),只改两点:
+     s 改为**节拍执行时**现读(换向第一拍拿到的就是新方向),节拍间隔 300ms → 80ms。
+     节拍间的视口冲刺由窗口头部余量(first_scroll≈4106px)与尾部余量(≈2900px)吸收。
+     v-for 带 key,节拍提频只增量挂摘头尾几张卡。仅在宽屏接管期内生效(与 .hei 减半
+     同进退,见 syncHeiUnits/unscaleHeiUnits),退出时还原原函数。 */
+  function pumpScrolling(vm) {
+    if (vm.__bwPumped) return;
+    /* 账本机制不齐的组件(别的页面恰好长着 list_all/padding_top)不接管:
+       节拍里要调它的 get_scroll_items/get_wb_hei,缺了会抛错 */
+    if (typeof vm.get_scroll_items !== 'function' ||
+        typeof vm.get_wb_hei !== 'function' ||
+        typeof vm.get_item_H !== 'function') return;
+    vm.__bwPumped = vm.scrolling;
+    vm.scrolling = function () {
+      var e = vm;
+      var doc = document.scrollingElement || document.body;
+      var s = doc.scrollTop;
+      if (!e.is_refresh && s > 0) {
+        e.is_upglide = s >= e.lastHeight;
+      }
+      e.lastHeight = s;
+      if (e.is_scrolling) return;
+      e.is_scrolling = true;
+      setTimeout(function () {
+        e.is_scrolling = false;
+        if (!e.$refs.cont) return;
+        /* 节拍执行时现读位置:换向后的第一拍拿到的就是新方向(原版用入口的过期值) */
+        var s2 = doc.scrollTop;
+        if (e.padding_top === 0 && s2 < e.first_scroll) return;
+        var a = s2 - e.first_scroll - e.last_scrolltop;
+        if (a > 0 && s2 - e.last_scrolltop > 0) {
+          if (Math.abs(a) >= e.get_item_H('start', 1)) {
+            var i = e.get_scroll_items(a, 'max');
+            if (i && typeof i === 'object') {
+              if (i.wb_list_top.length > 0 && i.wb_list_bottom.length > 0) {
+                e.padding_top += e.get_wb_hei(i.wb_list_top);
+                e.padding_bottom = e.padding_bottom > e.get_wb_hei(i.wb_list_bottom)
+                  ? e.padding_bottom - e.get_wb_hei(i.wb_list_bottom) : 0;
+                var c = e.list_cur.slice(i.diff_wb_list.length);
+                e.list_cur = c.concat(i.add_wb_list);
+                e.max = e.list_cur[e.list_cur.length - 1].feed_id;
+                e.since = e.list_cur[0].feed_id;
+                e.last_scrolltop += e.get_wb_hei(i.wb_list_top);
+                e.is_loading = false;
+              }
+            } else {
+              e.load_more(e.nextPageApi);
+              e.is_loading = true;
+            }
+          }
+        } else if (a < 0 && s2 - (e.last_scrolltop + e.first_scroll) < 0 &&
+                   Math.abs(a) >= e.get_item_H('end', 1)) {
+          var n = e.get_scroll_items(Math.abs(a), 'since');
+          if (n && typeof n === 'object') {
+            if (n.wb_list_top.length > 0 && n.wb_list_bottom.length > 0) {
+              e.padding_bottom += e.get_wb_hei(n.wb_list_bottom);
+              e.padding_top = e.padding_top > e.get_wb_hei(n.wb_list_top)
+                ? e.padding_top - e.get_wb_hei(n.wb_list_top) : 0;
+              var o = e.list_cur.length;
+              var l = e.list_cur.slice(0, o - n.diff_wb_list.length);
+              e.list_cur = n.add_wb_list.concat(l);
+              e.max = e.list_cur[e.list_cur.length - 1].feed_id;
+              e.since = e.list_cur[0].feed_id;
+              if (s2 === 0) e.last_scrolltop = 0;
+              else e.last_scrolltop -= e.get_wb_hei(n.wb_list_top);
+            }
+          } else {
+            e.padding_top = 0;
+          }
+        }
+      }, 80);
+    };
+    /* 站点若已把旧函数挂上 window.onscroll,换成泵;还是 null(尚未初始化)时不动,
+       站点自己会在 init_first_data 里把(已被替换的)vm.scrolling 挂上去 */
+    if (window.onscroll) window.onscroll = vm.scrolling;
+  }
+
+  function unpumpScrolling(vm) {
+    if (!vm.__bwPumped) return;
+    vm.scrolling = vm.__bwPumped;
+    delete vm.__bwPumped;
+    if (window.onscroll) window.onscroll = vm.scrolling;
+  }
+
   /** 记账同步到双列口径:.hei 减半 + 门槛同口径 + 窗口化留出头部余量。
       .hei 减半是幂等的:__bwHalf 标记随数据一起被站点持久化,恢复后不会二减;
       未经测量(hei 缺失)的条目等量完再换。 */
@@ -695,6 +1062,7 @@
       if (vm.__bwCount === undefined) vm.__bwCount = vm.count;
       if (vm.count !== WIN_ITEMS) vm.count = WIN_ITEMS;
       hookItemH(vm);
+      pumpScrolling(vm);
       var lists = [vm.list_all, vm.list_cur, vm.diff_items];
       for (var l = 0; l < lists.length; l++) {
         var arr = lists[l];
@@ -714,6 +1082,7 @@
   function unscaleHeiUnits(vm) {
     try {
       unhookItemH(vm);
+      unpumpScrolling(vm);
       if (vm.__bwFs !== undefined) {
         /* 门槛还给站点。不能直接回吐接管时抓的快照:站点只在首屏那次
            `first_scroll = .5*cont.offsetHeight - clientHeight/2` 里写它,
@@ -808,6 +1177,15 @@
     for (i = 0; i < recs.length; i++) {
       if (recs[i].col >= 0) { firstSurv = i; break; }
     }
+    /* 整窗换掉(硬 fling 一次冲过一屏,站点把 list_cur 整个推进)时幸存卡为 0:
+       行号只能从 0 重排,此时唯一可信的锚点是站点对新窗口算出的偏移,按 anchorOf
+       (Σ 窗口之前条目的 .hei)现算。不 re-anchor 的后果是实测过的:新窗口被钉在旧锚点
+       的行 0 上,内容整体留在原处而视口已经走远 —— 整屏无卡 ~0.5s,或者反过来把文档
+       高度撑回原处。 */
+    if (firstSurv < 0 && children.length) {
+      st.nodeInfo.clear();
+      st.ourPad = Math.max(0, Math.ceil(anchorOf(vm)));
+    }
     var colEnd = [0, 0], colTop = [0, 0];
     for (c = 0; c < 2; c++) {
       for (j = 0; j < cols[c].length; j++) {
@@ -868,16 +1246,27 @@
     });
 
     // —— padding-top 接管:内容文档坐标只由行号决定,站点的写值不再生效 ——
-    // 重置判定:站点数据归零且页面在顶部附近(下拉刷新/切分组/首屏),
-    // 或窗口已被清空 → 行位全部作废,从当前 padding 重新接管
+    // 重置判定:站点数据归零**且窗口真的回到已加载列表头部**(下拉刷新/切分组/大步上插回顶)。
+    // 只按 padding_top===0 判不够 —— 站点在"回插拿不到
+    // 条目"的分支里会把它直接写成 0(实测 fling 中触发),那时窗口还在列表中段,
+    // 清行位会让文档高度塌回顶部、scrollY 被夹到 0(表现为"甩两下自己回到首页顶")。
     if (st.ourPad !== null && vm.padding_top === 0 &&
-        ((window.scrollY || 0) < 60 || (vm.list_cur && vm.list_cur.length < 5))) {
+        (!(vm.list_cur && vm.list_all) || vm.list_all.indexOf(vm.list_cur[0]) === 0)) {
+      /* 站点把账归零且窗口真的回到已加载列表头部:下拉刷新/切分组,以及大步上插
+         的"回到列表头"分支(站点此时把 padding_top 清零并整窗替换为头部一页)。
+         曾加过 (scrollY<60 || cur<5) 的额外保护 —— 实测挡住了后者:泵(节拍现读 s)
+         之后硬甩回顶经常精确落进这个分支,y≈600 处 ourPad 仍钉在旧值(~2100px),
+         网格整体被压到视口下方,顶部露出 1~2s 的整段空白(探针实测 1962ms)。
+         "fling 中站点乱写 padding_top=0"的假重置窗口在列表中段(fi>0),已被
+         第二行的 indexOf===0 排除,不需要滚动位置来帮衬。 */
       st.ourPad = null;
       st.nodeInfo.clear();
       wrap.style.paddingBottom = '';   // 刷新/切组:伺服燃料一并归零重计
     }
     if (st.ourPad === null) {
-      st.ourPad = Math.max(0, parseFloat(wrap.style.paddingTop) || 0);
+      /* 跟站点的账本变量,不读 DOM:此时 Vue 可能还没把 padding_top=0 刷进 style,
+         读 DOM 会把刚归零的锚又钉回旧值 */
+      st.ourPad = Math.max(0, Math.ceil(vm.padding_top || 0));
     }
     var wantPad = Math.ceil(st.ourPad) + 'px';
     if (wrap.style.paddingTop !== wantPad) wrap.style.paddingTop = wantPad;
@@ -956,6 +1345,21 @@
         layoutAuto(wrap);               // 我的页等:沿用自动排布
       }
     }
+  }
+
+  /** 窗口首卡在文档里的偏移,按站点自己的记账口径现算(Σ 窗口之前条目的 .hei)。
+      不读 vm.padding_top:站点在"回插拿不到条目"的分支里会把它直接写成 0
+      (实测 fling 中它的 else 分支会 padding_top=0),那时它并不等于真实偏移。 */
+  function anchorOf(vm) {
+    try {
+      var all = vm.list_all, cur = vm.list_cur;
+      if (!all || !cur || !cur.length) return 0;
+      var fi = all.indexOf(cur[0]);
+      if (fi < 0) return Math.max(0, vm.padding_top || 0);
+      var t = 0;
+      for (var i = 0; i < fi; i++) t += (all[i] && all[i].hei) || 0;
+      return t;
+    } catch (e) { return Math.max(0, vm.padding_top || 0); }
   }
 
   function clearMasonry() {
@@ -1062,6 +1466,12 @@
       var root = document.documentElement;
       if (!root) { return; }
       root.classList.toggle('bw-deep', deep);
+      /* 编辑页(撰写/转发/讨论)整页是 .m-main 那种固定列,文档永远停在 y=0,
+         下拉手势会被外层 SwipeRefreshLayout 整个抢走 —— 打字时往下拽就触发了刷新。
+         SPA 换路由不重走页面加载,原生看不到 URL 变化,只能由这里报。 */
+      if (window.BwNative && BwNative.setEditorOpen) {
+        BwNative.setEditorOpen(/^\/compose/.test(p));
+      }
       root.classList.toggle('bw-page-search', p.indexOf('/search') === 0 || p.indexOf('/s/') === 0);
       root.classList.toggle('bw-page-msg', p.indexOf('/msg') === 0 || p.indexOf('/message') === 0);
       root.classList.toggle('bw-page-me', p.indexOf('/profile') === 0 || p.indexOf('/my') === 0 || p.indexOf('/u/') === 0);
@@ -1107,6 +1517,11 @@
       /* 设置及其子页是另一套老架构(根节点 div#box、没有 #app),按结构标记而不是按路由猜:
          凡是带 .module-topbar 的页面都走 theme.js 里 html.bw-legacy 那一组版式 */
       root.classList.toggle('bw-legacy', !document.getElementById('app') && !!document.querySelector('.module-topbar'));
+      /* 出错页(404/500):站点服务端直出的 .h5-4box(标题"微博 - 出错了404"),
+         既没有 #app 也不是 .module-topbar,标记会兜底落成 bw-server —— 而 bw-server
+         那组是按"设置族列表页"排的(64px 顶距 + 通栏卡片),套到一页只有图和文字链的
+         错误页上只是让它贴顶左对齐。theme.js 的 html.bw-404 单独成套(居中卡片)。 */
+      root.classList.toggle('bw-404', !!document.querySelector('.h5-4box'));
       /* 还有一批更老的"服务端直出页"(隐私设置 /setting/priset、屏蔽设置 /setting?tab=block、
          悄悄关注、编辑资料 /users/…?set=1、账号安全 security.weibo.com/account/security):
          既没有 #app 也没有 .module-topbar,根节点是 .m-container-max / #h5_page_wrap /
@@ -1135,6 +1550,14 @@
       killAppNags();
       masonry();
       watchFeed();
+      paintComposeIcons();
+      paintComposeCaret();
+      watchComposeIcons();
+      watchComposeFocus();
+      syncComposeMirror();
+      placeComposeAvatar();
+      allowComposeThumbnails();
+      syncGalleryOverlay();
       /* 悬浮导航与发博按钮只在四个主 tab 出现,其余一律收掉:
          正文页 / 私信会话(那条输入框在常规流里,胶囊压上去实测重叠 388x39) / 撰写 /
          设置族(老架构 #box + 服务端直出子页) / 头条文章 / 超话 / 热搜条目页
@@ -1151,12 +1574,17 @@
         tb.classList.toggle('bw-hidden', hidden);
       }
       var fabEl = document.getElementById('bw-fab');
+      var disc = searchDiscuss();
+      /* 有那条讨论栏时:球顶替它(主题样式在 theme.js 按这个类切换) */
+      root.classList.toggle('bw-fab-disc', !!disc);
       if (fabEl) {
-        fabEl.classList.toggle('bw-hide', immersive || !document.querySelector('.lite-iconf-releas'));
+        fabEl.classList.toggle('bw-hide', disc ? overlayOpen()
+          : (immersive || !document.querySelector('.lite-iconf-releas')));
         fabEl.classList.toggle('bw-scroll-hide', hidden);
       }
       syncFloatChrome(deep, hidden);      syncDrop();
       fixSearchHint();
+      syncSearchTabStrip();
     } catch (e) { /* ignore */ }
   }
 
@@ -1171,9 +1599,30 @@
     }, 250);
   }
 
+  /* 换页这一刀不能等 250ms 节流:从正文页/个人页返回首页时,返回球要等下一次
+     schedule 才收 —— 实测路由离开内页 +150ms,球到 +411ms 才消失(迟钝 261ms,
+     正好是防抖的 250ms),用户看到的就是"球压在信息流上愣了一下才没"。
+     路由键一变就在同一批变异里同步一次,并取消待执行的防抖,不再跑第二遍。 */
+  var lastRoute = location.pathname + location.search;
+  function routeChanged() {
+    var now = location.pathname + location.search;
+    if (now === lastRoute) return false;
+    lastRoute = now;
+    return true;
+  }
+
   schedule();
   try {
     window.addEventListener('scroll', refresh, {passive: true});
+    window.addEventListener('popstate', function () {
+      /* 浏览器/系统返回不一定伴随 DOM 变异,路由变化也立刻同步一次 */
+      syncRouteClasses();
+      if (routeChanged()) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        build();
+        refresh();
+      }
+    }, {passive: true});
     new MutationObserver(function () {
       /* 快路径:宽屏下信息流容器一出现(或被整换)就立刻挂专守,
          不等 schedule 的 250ms 节流;挂上时 layoutMasonry 同步排首批。
@@ -1182,6 +1631,10 @@
         try { watchFeed(); } catch (e) { /* ignore */ }
       }
       syncRouteClasses();
+      if (routeChanged()) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        try { build(); refresh(); } catch (e) { /* ignore */ }
+      }
       schedule();
     }).observe(document.documentElement, {
       childList: true, subtree: true

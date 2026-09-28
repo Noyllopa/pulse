@@ -10,6 +10,7 @@
     <string name="download_failed">下载失败</string>
     <string name="download_unsupported">该图片无法直接下载</string>
     <string name="menu_save_image">下载图片</string>
+    <string name="menu_save_media">下载 Live 图</string>
     <string name="menu_copy_image_url">复制图片地址</string>
     <string name="menu_copied">已复制</string>
 </resources>
