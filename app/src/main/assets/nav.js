@@ -7,6 +7,16 @@
 (function () {
   if (!document.documentElement) return;
 
+  /* 一份文档里只准有一套接管实例。注入侧 onPageStarted 与 onPageFinished 各来一遍
+     (实测同一份文档最多进 5 次),而这套逻辑的状态(排布账本、观察器、悬浮件)都在
+     闭包里 —— 第二套实例带着另一本账改写同一批卡片,两边交替把同一张卡写到不同的
+     grid-column / grid-row 上:实测单页 1.2 万次对写、文档高来回抖 398px、渲染主线程
+     100%、CDP 120s 不回话,用户看到的就是"微博自己挪位、页面卡住点不动、
+     全屏图片停在页面上方关不掉"。
+     守卫挂在 window 上:换文档(整页加载/刷新)时 window 是新的,自然重新注入。 */
+  if (window.__bwNavReady) return;
+  window.__bwNavReady = true;
+
   // 与原生 LOGIN_URL 保持一致:这个入口自带回跳 m.weibo.cn 的参数
   var LOGIN_PAGE = 'https://passport.weibo.cn/signin/login';
   var host = location.hostname;
@@ -223,11 +233,24 @@
 
   /* .pswp 那颗节点是常驻的(收起只是 display:none),所以盯它自己:
      class/style 一变就同步一次状态,不等 refresh 的 250ms 防抖。 */
-  var pswpObs = null;
+  var pswpObs = null, galleryWasOpen = null;
   function syncGalleryOverlay() {
     var open = pswpOpen();
-    if (window.BwNative && window.BwNative.setGalleryOpen) {
-      try { window.BwNative.setGalleryOpen(open); } catch (e) { /* ignore */ }
+    /* 只在真的换态时过一趟 JS→Java 桥:原来每次调用都无条件报一遍,
+       而调用方是滚动事件 + 每 250ms 的调度 + .pswp 的变异观察器。 */
+    if (open !== galleryWasOpen) {
+      galleryWasOpen = open;
+      if (window.BwNative && window.BwNative.setGalleryOpen) {
+        try { window.BwNative.setGalleryOpen(open); } catch (e) { /* ignore */ }
+      }
+      /* 收起的那一刻补排:浮层开着时 layoutMasonry 直接 return(见那里的守卫),
+         关掉的瞬间信息流要回到接管态。站点自己的收合动画还要跑几百毫秒,
+         期间它写的仍是单列口径的行位,所以过后再补一次,别停在半程状态。
+         换态才补,不在每帧的 class/style 变异里补。 */
+      if (!open) {
+        try { masonry(); } catch (e) { /* ignore */ }
+        setTimeout(function () { try { masonry(); } catch (e) { /* ignore */ } }, 420);
+      }
     }
     var p = document.querySelector('.pswp');
     if (!p) {
@@ -237,8 +260,11 @@
     if (!pswpObs) {
       try {
         pswpObs = new MutationObserver(function () { syncGalleryOverlay(); });
-        pswpObs.observe(p, {attributes: true, childList: true, subtree: true,
-          attributeFilter: ['class', 'style']});
+        /* 只看 .pswp 自己的 class/style —— 开关态就写在这两个属性上。
+           原来带 subtree:true,而 PhotoSwipe 拖动时**每帧**都在写后代的 transform,
+           实测一次拖动手势里观察器进 60 次、每次一趟强制重排;漏掉的态还有
+           refresh()(滚动 + 250ms 调度)兜着。 */
+        pswpObs.observe(p, {attributes: true, attributeFilter: ['class', 'style']});
       } catch (e) { pswpObs = null; }
     }
     /* 左上角返回胶囊:站点自己的关闭键在右上,这条补的是"左上角也能退"。
@@ -470,6 +496,10 @@
   function pswpOpen() {
     var el = document.querySelector('.pswp');
     if (!el) return false;
+    /* 站点收起时写的是内联 display:none —— 先读内联值就能判掉,省一次强制重排。
+       这条不是微优化:syncGalleryOverlay 挂在 refresh() 上,每个滚动事件都要进来
+       一趟(实测单页 3114 次),每次都 getComputedStyle + getBoundingClientRect。 */
+    if (el.style.display === 'none') return false;
     var cs = window.getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden') return false;
     var r = el.getBoundingClientRect();
@@ -738,6 +768,36 @@
     syncEditorClass();
   }
 
+  /* 搜索壳该不该收起。判据只用"滚过多少" + 自己记的那条位置,不读站点那条 fixed:
+     站点在分类条吸顶那一刻给 .module-page-fragment 加 fixed,而它改这个类的时机排在
+     我们自己的 scroll 回调**后面** —— 于是快速上滑停手时,最后一次求值看到的还是
+     fixed=true,收起态就被留在 on 了(2026-09-30 用户报的"上滑过快,搜索框和返回按钮
+     无法恢复";实测停在 y=0、fixed 已摘、分类条回到 top:167,而 bw-bar-collapse 仍 true,
+     之后再没有 scroll 事件来纠正 —— 变异观察器只看 childList,类改动唤不醒它)。
+     改法:分类条**在常规流里**的那些时刻记下它自己的文档坐标顶边(实测这条页 167),
+     判据 = 那条顶边减去 scrollY 有没有落到搜索壳底边之下(留 HEAD_LEAD 提前量)。
+     两个量的坐标系要一致,都是**视口**:壳的底边取 offsetTop - scrollY + offsetHeight,
+     不取 getBoundingClientRect().bottom —— 收起态给自己那条壳加了 translateY(-16px),
+     rect 会把这 16 算进去,阈值就跟着当前收起状态漂(实测原来那条判据收起在 y=76、
+     放回在 y=88,中间 12px 就是这 16px 造成的迟滞)。sticky 元素的 offsetTop 会跟着
+     吸顶位移一起涨(实测 y=120 时报 134),所以必须减掉 scrollY 才是它在视口里的底边。
+     没有分类条(或没有搜索壳)的页面一律不收:那等于把改关键词的入口弄丢。 */
+  var HEAD_LEAD = 24;
+  var fragDocTop = null;
+  function searchHeadAtTop() {
+    var shell = document.querySelector('.ntop-nav');
+    var bar = document.querySelector('.m-top-nav');
+    if (!shell || !bar) { fragDocTop = null; return false; }
+    var frag = (bar.closest && bar.closest('.module-page-fragment')) || bar;
+    var r = frag.getBoundingClientRect();
+    var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+    if (r.height && !frag.classList.contains('fixed')) fragDocTop = r.top + y;
+    // 还没机会在流里见过这条(页面一打开就停在深处):退回按站点的 fixed 判一次
+    if (fragDocTop === null) return frag.classList.contains('fixed');
+    var shellBottom = shell.offsetTop - y + shell.offsetHeight;
+    return fragDocTop - y <= shellBottom + 10 + HEAD_LEAD;
+  }
+
   function syncFloatChrome(deep, hidden) {
     var wide = WIDE.matches;
     var editor = document.querySelector('.lite-page-editor');
@@ -769,13 +829,14 @@
     fb.classList.toggle('bw-scroll-hide', chrome);
     set.classList.toggle('bw-scroll-hide', chrome);
     if (editor) editor.classList.toggle('bw-scroll-hide', chrome);
-    /* 搜索/热搜条目页:下滑时收起左上返回钮与搜索框,让分类条自己顶到屏顶。
-       两个前提:这一页有搜索壳 .ntop-nav,也有分类条 .m-top-nav ——
-       没有分类条还收搜索框,人就再也改不了关键词了。
-       只在手机档为真(hidden 已被宽度过滤):平板档这一页没有常驻顶栏
-       (搜索壳不吸顶、分类条改左侧竖栏,见 theme.js 大屏段),没有要收的东西。 */
-    var collapse = hidden && hcls.contains('bw-page-search')
-      && !!document.querySelector('.ntop-nav') && !!document.querySelector('.m-top-nav');
+    /* 搜索/热搜条目页:收起左上返回钮与搜索框,让分类条自己顶到屏顶。
+       时机不再跟悬浮件那套锁存 —— 固定 200px 与"分类条到没到顶"根本不对齐
+       (实测这条页分类条在 scrollY≈99 就吸住了,原来要等到 200 才收,
+       中间那 100px 就是用户报的"条已经到顶了搜索框还杵在那儿")。
+       改由 searchHeadAtTop 按分类条自己的位置判,上滑回去也按同一个位置放。
+       只在手机档:平板档这一页没有常驻顶栏(搜索壳不吸顶、分类条改左侧竖栏,
+       见 theme.js 大屏段),没有要收的东西。 */
+    var collapse = !wide && hcls.contains('bw-page-search') && searchHeadAtTop();
     hcls.toggle('bw-bar-collapse', collapse);
   }
 
@@ -830,6 +891,57 @@
     if (bar) syncTabStrip(bar);
   }
 
+  /* 一条微博超过 9 张图:只显示前 8 张,第 9 格换成一块同样大小的 "+x" 面牌
+     (x = 被藏起来的张数)。点面牌跳到第 9 张 —— 面牌自己不吃点击
+     (pointer-events:none),按下落到第 9 格那张图上,走站点自己的看图链路
+     (实测点第 5 格 → #&gid=1&pid=5、计数器 "5 / 12"),不模拟点击也不拼路由。
+     正好 9 张(以及更少的)一律不动。 */
+  var NINE_KEEP = 8;
+  var DEEP_RE = /^\/(status|detail|comments|attitudes)\//;
+  function clampNineGrid() {
+    /* 只管列表卡。正文页(/status|/detail|/comments|/attitudes)一条都不动 ——
+       用户要的是"列表里收一下,点进去有多少张显示多少张";再加一道结构闸
+       (必须挂在列表卡 .wb-item-wrap 里),正文页那套媒体本来也不在这个壳里。 */
+    if (DEEP_RE.test(location.pathname)) return;
+    var lists = document.querySelectorAll(
+      '.wb-item-wrap .weibo-media-wraps ul.m-auto-list');
+    for (var i = 0; i < lists.length; i++) {
+      var ul = lists[i];
+      var n = ul.children.length;
+      if (n <= 9) {
+        if (ul.__bwClamp !== n) { ul.__bwClamp = n; ul.__bwTile = null; }
+        continue;
+      }
+      if (ul.__bwClamp === n && ul.__bwTile && ul.__bwTile.isConnected) continue;
+      ul.__bwClamp = n;
+      var tile = null;
+      for (var k = NINE_KEEP; k < n; k++) {
+        var li = ul.children[k];
+        if (k === NINE_KEEP) {
+          li.style.display = '';
+          tile = moreTile(li, n - NINE_KEEP);
+        } else {
+          if (li.style.display !== 'none') li.style.display = 'none';
+        }
+      }
+      ul.__bwTile = tile;
+    }
+  }
+
+  /** 在第 9 格的图盒上盖一块 "+x" 面牌(格子的圆角/裁切由站点那层 .m-img-box 自带) */
+  function moreTile(li, hidden) {
+    var box = li.querySelector('.m-img-box') || li;
+    var t = box.querySelector('.bw-more');
+    if (!t) {
+      t = document.createElement('div');
+      t.className = 'bw-more';
+      box.appendChild(t);
+    }
+    var txt = '+' + hidden;
+    if (t.textContent !== txt) t.textContent = txt;
+    return t;
+  }
+
   /* CSS Grid 不支持 masonry(Chrome 145 实测),行轨切成 2px 细格、按卡片高度写
      span 等价于瀑布流,且完全不动 DOM 结构(站点的无限追加、事件代理都不受影响)。
 
@@ -875,6 +987,9 @@
     var st = feedStates.get(wrap);
     if (!st) {
       st = new FeedState();
+      /* 新状态第一次起锚前先按测量保连续(见 layoutPinned 里 stFresh 那段):
+         容器换人时卡片上还挂着上一份状态写的行位,直接按站点账本起锚会跳位 */
+      st.stFresh = true;
       feedStates.set(wrap, st);
       pinnedWraps.push(wrap);
     }
@@ -973,14 +1088,17 @@
      v-for 带 key,节拍提频只增量挂摘头尾几张卡。仅在宽屏接管期内生效(与 .hei 减半
      同进退,见 syncHeiUnits/unscaleHeiUnits),退出时还原原函数。 */
   function pumpScrolling(vm) {
-    if (vm.__bwPumped) return;
+    /* 守卫用**函数身份**比对而不只看标记:实测存在 scrolling 被换回原函数而
+       __bwPumped 标记残留的状态(多重注入实例的挂/卸交错),此时必须重新接管。
+       __bwPumped 只在第一次接管时保存原函数,重挂不覆盖它,退出时才有得还。 */
+    if (vm.__bwPumpFn && vm.scrolling === vm.__bwPumpFn) return;
     /* 账本机制不齐的组件(别的页面恰好长着 list_all/padding_top)不接管:
        节拍里要调它的 get_scroll_items/get_wb_hei,缺了会抛错 */
     if (typeof vm.get_scroll_items !== 'function' ||
         typeof vm.get_wb_hei !== 'function' ||
         typeof vm.get_item_H !== 'function') return;
-    vm.__bwPumped = vm.scrolling;
-    vm.scrolling = function () {
+    if (!vm.__bwPumped) vm.__bwPumped = vm.scrolling;
+    vm.__bwPumpFn = function () {
       var e = vm;
       var doc = document.scrollingElement || document.body;
       var s = doc.scrollTop;
@@ -1012,9 +1130,16 @@
                 e.last_scrolltop += e.get_wb_hei(i.wb_list_top);
                 e.is_loading = false;
               }
-            } else {
-              e.load_more(e.nextPageApi);
-              e.is_loading = true;
+            } else if (e.nextPageApi) {
+              /* 失败限流:网络失败时请求瞬断→catch→is_request 复位→下一拍(80ms)
+                 又发 → 12.5 次/秒的失败风暴,甩动途中主线程被打满(用户报"卡死")。
+                 同一次 load_more 3s 内不重发;慢网络下 is_request 本身就闸住并发。 */
+              var now = Date.now();
+              if (!e.__bwLmAt || now - e.__bwLmAt > 2500) {
+                e.__bwLmAt = now;
+                e.load_more(e.nextPageApi);
+                e.is_loading = true;
+              }
             }
           }
         } else if (a < 0 && s2 - (e.last_scrolltop + e.first_scroll) < 0 &&
@@ -1037,17 +1162,74 @@
             e.padding_top = 0;
           }
         }
+        healFeed(e);
       }, 80);
     };
+    vm.scrolling = vm.__bwPumpFn;
     /* 站点若已把旧函数挂上 window.onscroll,换成泵;还是 null(尚未初始化)时不动,
        站点自己会在 init_first_data 里把(已被替换的)vm.scrolling 挂上去 */
     if (window.onscroll) window.onscroll = vm.scrolling;
+    /* 自愈不能只挂在滚动上:燃料见底时文档已经滚不动,也就再没有滚动事件。 */
+    if (!vm.__bwHealTimer) vm.__bwHealTimer = setInterval(function () {
+      healFeed(vm);
+    }, 2000);
+  }
+
+  /** 与滚动无关的信息流自愈。两条都是"新的加载不出来"的死路:
+      ① 站点翻页失败会把 re_do 置 true(模板据此画"加载异常，稍后再试试~"),
+        而重试只挂在**用户点击那条提示**和滚动上 —— 我们补的燃料见底后文档
+        滚不动,视口停在 padding 的虚空里(那条提示在视口上方),re_do 永远出不去。
+        这里直接调用站点自己的 load_more(nextPageApi),与点那条提示是同一个动作。
+      ② 下拉刷新撞上断网 → 首页拉取失败 → net_error 整页替掉信息流。list_all
+        已空时没什么可保护,每 5s 代拉一次首屏,网络一恢复就自动回来;
+        列表非空绝不代拉(pull_refresh 会清滚动位置)。
+      限流与泵/提前翻页共用 __bwLmAt 那道闸。 */
+  function healFeed(e) {
+    try {
+      if (!e || !e.$refs || !e.$refs.cont) return;
+      var now = Date.now();
+      if (e.re_do && !e.is_request && !e.is_loading && e.nextPageApi &&
+          (!e.__bwLmAt || now - e.__bwLmAt > 2500)) {
+        e.__bwLmAt = now;
+        e.load_more(e.nextPageApi);
+      }
+      if (e.net_error && e.net_error.flag && e.list_all && !e.list_all.length &&
+          !e.is_request && !e.is_refresh && now - (e.__bwHealAt || 0) > 5000) {
+        e.__bwHealAt = now;
+        e.pull_refresh();
+      }
+      /* 页面一安静,信息流的两条驱动会同时断掉:伺服补燃料挂在 DOM 变异上、
+         提前翻页挂在 layoutPinned(同样由变异触发)里,而泵的窗口推进挂在滚动事件上。
+         "顶在文档底"恰好三样都榨不出来,于是死在水上:
+         · 实测一:y=14189 / roomLeft=0 / all=156,窗口前面压着 27 条已加载未渲染条目,
+           燃料不再补 —— 踢一次 masonry() 就让伺服按自己的上限补、翻页按自己的闸门判。
+         · 实测二:y=123433 / docH=124177 / roomLeft=0 / all=524,账本上
+           a = y-first_scroll-last_scrolltop = 9857 ≥ get_item_H(287),泵去问
+           get_scroll_items(9857,'max') 拿到的是**标量**(条目不够填满这段位移),
+           按站点的规矩该分支就是去要下一页 —— 可要下一页这个动作本身也要滚动事件
+           才会被执行第二次。gap=524-497=27 > LOAD_AHEAD 12,所以只踢排布救不回来
+           (上一版栽在这里)。心跳因此照泵那条分支自己走一次:顶在底、没有请求在飞、
+           还有下一页,就要一页;限流仍共用 __bwLmAt。站点自己说没有更多了
+           (no_data.flag)时不收,免得对着尽头一路预取。 */
+      var de = document.scrollingElement || document.body;
+      if (de && de.scrollHeight - (de.scrollTop + (window.innerHeight || 0)) <= 4) {
+        masonry();
+        if (!e.is_request && !e.is_loading && !e.is_refresh && !e.re_do &&
+            e.nextPageApi && (!e.no_data || !e.no_data.flag) &&
+            (!e.__bwLmAt || now - e.__bwLmAt > 2500)) {
+          e.__bwLmAt = now;
+          e.load_more(e.nextPageApi);
+        }
+      }
+    } catch (err) { /* ignore */ }
   }
 
   function unpumpScrolling(vm) {
     if (!vm.__bwPumped) return;
+    if (vm.__bwHealTimer) { clearInterval(vm.__bwHealTimer); vm.__bwHealTimer = null; }
     vm.scrolling = vm.__bwPumped;
     delete vm.__bwPumped;
+    delete vm.__bwPumpFn;
     if (window.onscroll) window.onscroll = vm.scrolling;
   }
 
@@ -1133,27 +1315,129 @@
   }
 
   /** 固定行位布局:幸存卡不动,新卡按最短列落位,顶部回插卡摞在列顶之上 */
+  /* padding-bottom 的"零"有两种写法:重置/站点归零写 ''(没有内联值),伺服补到 0
+     时写 '0px'。数值相同、字符串不同 —— 按字符串判"有没有变"就会让重置与回收互相
+     触发(实测 layoutPinned 自转 11000+ 次、每批 6 条 attr:style,渲染主线程 100%
+     挂死在骨架屏之后)。一律按数值比对,写回时零统一落成 ''。 */
+  function setPadBottom(wrap, wantNum) {
+    var cur = parseFloat(wrap.style.paddingBottom) || 0;
+    if (cur === wantNum) return;
+    wrap.style.paddingBottom = wantNum > 0 ? wantNum + 'px' : '';
+  }
+
+  /* —— 按卡片身份的连续性记忆 ——
+     行位账(nodeInfo)按 DOM 节点记,而进正文再返回首页时 Vue 把整批卡换了人:
+     幸存卡归零 → 重锚。重锚只能量"此刻的 DOM",可站点在这之前已经把它自己的
+     padding_top 写进了同一棵树(实测 domPT 33204 → 49630,正好等于 last_scrolltop),
+     于是量到的是**已经跳过之后**的位置,连续性等式把这次跳动当成现状钉死 ——
+     用户看到的就是"返回首页后卡片比进入前低 150~240px"。
+     所以另记一笔与节点无关的账:最近一轮排完后,视口顶那张卡的
+     {身份, 文档坐标, scrollY}。身份用站点自己的 mblog.id(换人前后是同一张卡),
+     重锚写完行位与 padding 之后,再量一次那张卡的落点,把残差补进 padding-top。
+     只在"滚动位置基本没变"时校正(站点自己滚走了就别抢它的方向盘),
+     并在下拉刷新/切分组那一支清空(那里的位移是语义,不是缺陷)。 */
+  var REF_TOP_SLACK = 160;      // 参考卡 = 上沿落在视口顶下方 160px 以内最靠下的那张
+  var REF_SCROLL_SLACK = 120;   // 记忆只在 scrollY 相差小于此值时生效
+  var REF_TTL = 600000;         // 记忆 10 分钟过期
+  var contMem = null;           // {key, docTop, y, at}
+
+  /* 排布本身也要跨"整份状态重建"活下来。进正文再返回首页时 feed 组件会重建,
+     feedStates 按新 wrap 取到的是一份**空**账本 —— 于是每张卡都当"新卡"重排:
+     实测返回首页后 23 张卡的行号全部重编、其中 3~6 张换了列,
+     用户报的就是"右栏那条含图的微博,返回首页跑到左栏去了"。
+     列/行/高按卡片身份另记一份模块级的账,新状态起手先照它复位;
+     下拉刷新/切分组那一支清空它(那里重排是语义,不是缺陷)。 */
+  var placeMem = new Map();     // id -> {col, row, h}
+  var placePad = null;          // 这套行位当初是配着哪个 padding-top 写的
+  var PLACE_MAX = 400;
+
+  /** 卡片身份:DOM 子节点与 vm.list_cur 同序(站点 v-for,原代码的 .hei 校准也这么对),
+      按索引回查站点自己的 id。取不到返回 null(不同序 / 无 feed 组件时不校正)。 */
+  function cardKeyAt(vm, idx) {
+    try {
+      var it = vm && vm.list_cur && vm.list_cur[idx];
+      if (!it) return null;
+      var k = (it.mblog && (it.mblog.id || it.mblog.mid)) || it.id || it.feed_id;
+      return k === undefined || k === null || k === '' ? null : String(k);
+    } catch (e) { return null; }
+  }
+
+  /** 本轮读到的参考卡:优先"上沿在折叠线附近的最靠下那张",全在下方时退到最顶一张 */
+  function refCard(recs, y) {
+    var lowIdx = -1, lowTop = -1e9, minIdx = -1, minTop = 1e9;
+    for (var q = 0; q < recs.length; q++) {
+      if (recs[q].box <= 0) continue;
+      if (recs[q].docTop < minTop) { minTop = recs[q].docTop; minIdx = q; }
+      if (recs[q].docTop <= y + REF_TOP_SLACK && recs[q].docTop > lowTop) {
+        lowTop = recs[q].docTop; lowIdx = q;
+      }
+    }
+    return lowIdx >= 0 ? lowIdx : minIdx;
+  }
+
   function layoutPinned(wrap, st, vm) {
     var children = wrap.children;
     if (!children.length) return;
     syncHeiUnits(vm);
 
+    /* DOM 子节点与 vm.list_cur 严格同序时,按索引回查到的 id 才可信
+       (与下面 .hei 校准同一道闸);不同序时退回按节点记。 */
+    var idOK = !!(vm.list_cur && vm.list_cur.length === children.length);
     // —— 读:本帧全部子项的外边距盒高(先读后写,只强排一次)——
     var i, el, recs = [];
     for (i = 0; i < children.length; i++) {
       el = children[i];
-      var box = el.getBoundingClientRect().height;
+      var rr = el.getBoundingClientRect();
+      var box = rr.height;
       if (box > 0) {
         var cs = window.getComputedStyle(el);
         box += (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
       }
-      recs.push({el: el, box: box, col: -1, row: 0, span: 1, h: null});
+      /* 文档坐标 = 视口坐标 + scrollY(rect 已经是视口坐标,别再乘一次) */
+      recs.push({el: el, key: idOK ? cardKeyAt(vm, i) : null,
+                 box: box, docTop: rr.top + (window.scrollY || 0),
+                 col: -1, row: 0, span: 1, h: null});
     }
+    /* 容器有子卡却一张都量不到高度 = 它此刻根本没被渲染
+       (实测:进正文再返回首页的路由切换期间,旧正文视图被整体包进 .main-pos 隐藏,
+        所有 rect 都是 0)。这一轮**什么都别决定**:既不能按测量保连续(没得测),
+        也不该按账本起锚 —— 账本与行号表示之间实测有 154~236px 的漂移,
+        在隐藏帧里把它写死,回到可见时就是一次可见跳动。
+        等下一轮(可见了)再按测量锚,连续性等式那时才成立。 */
+    var anyBox = false;
+    for (i = 0; i < recs.length; i++) { if (recs[i].box > 0) { anyBox = true; break; } }
+    if (!anyBox) return;
+
+    /* —— 连续性:本轮的参考卡,以及记忆那张卡此刻在哪 ——
+       参考卡在**读阶段**选(写之前量到的才是用户这一轮真正看到的),
+       memIdx 按身份匹配上一轮记下的那张卡。二者可以不是同一张:
+       记忆负责"把该留在原地的留在原地",参考卡负责"下一轮该拿什么当原地"。 */
+    var yRef = window.scrollY || 0;
+    var refIdx = refCard(recs, yRef);
+    var refKey = (refIdx >= 0 && idOK) ? cardKeyAt(vm, refIdx) : null;
+    var refDoc = refIdx >= 0 ? recs[refIdx].docTop : 0;
+    var memIdx = -1;
+    if (idOK && contMem && Math.abs(yRef - contMem.y) <= REF_SCROLL_SLACK &&
+        Date.now() - contMem.at < REF_TTL) {
+      for (i = 0; i < recs.length; i++) {
+        if (recs[i].box > 0 && cardKeyAt(vm, i) === contMem.key) { memIdx = i; break; }
+      }
+    }
+    var anchored = false;   // 本轮是否重新定了锚(只有这一支才做落点校正)
+    var restored = 0;       // 本轮有多少张卡是从**身份排布记忆**复位的(状态换了人)
 
     // —— 幸存卡:沿用 {col,row};高度变化量累计成同列下方的顺移 ——
     var cols = [[], []], c, j;
     for (i = 0; i < recs.length; i++) {
-      var prev = st.nodeInfo.get(recs[i].el);
+      /* 按身份查账而不是按节点:站点重渲染会换掉 DOM 节点,按节点记的账一换人
+         就当"新卡"重新排位 —— 同一张卡在两次排布里落到不同列、行号差几百,
+         这正是"已显示的微博位置突然变化"的形态。 */
+      var pkey = recs[i].key || recs[i].el;
+      var prev = st.nodeInfo.get(pkey);
+      if (!prev && recs[i].key) {
+        prev = placeMem.get(recs[i].key);
+        if (prev) restored++;      // 行位是从上一份状态那儿接过来的
+      }
       if (!prev) continue;
       recs[i].col = prev.col; recs[i].row = prev.row; recs[i].h = prev.h;
       cols[prev.col].push(recs[i]);
@@ -1178,13 +1462,46 @@
       if (recs[i].col >= 0) { firstSurv = i; break; }
     }
     /* 整窗换掉(硬 fling 一次冲过一屏,站点把 list_cur 整个推进)时幸存卡为 0:
-       行号只能从 0 重排,此时唯一可信的锚点是站点对新窗口算出的偏移,按 anchorOf
-       (Σ 窗口之前条目的 .hei)现算。不 re-anchor 的后果是实测过的:新窗口被钉在旧锚点
-       的行 0 上,内容整体留在原处而视口已经走远 —— 整屏无卡 ~0.5s,或者反过来把文档
-       高度撑回原处。 */
-    if (firstSurv < 0 && children.length) {
+       行号只能从 0 重排。不 re-anchor 的后果是实测过的:新窗口被钉在旧锚点的
+       行 0 上,内容整体留在原处而视口已经走远 —— 整屏无卡 ~0.5s,或者反过来把
+       文档高度撑回原处。
+       锚值**怎么**定见下面这一支:先按测量保连续,量不到时才退回账本
+       (anchorOf = Σ 窗口之前条目的 .hei;它与站点 last_scrolltop 冲突超 200px
+       时信 last_scrolltop,因为 Σhei 会被 save_height 在隐藏容器里量出的单列整卡高
+       污染 —— 条目 __bwHalf 标记早在,syncHeiUnits 的减半会跳过,账面由此虚高)。 */
+    /* 加 st.nodeInfo.size 这一道:重锚是**整窗换掉**这个动作的善后,只有"我们确实
+       排过行位、而这一轮幸存卡归零"才成立。原来只看 firstSurv<0,而首轮(以及任何
+       账本被清空的轮次)nodeInfo 本来就是空的 —— 于是这一支变成电平条件,每轮都
+       重锚一次;它写的又是 padding-top(深度场景下 anchorOf 与 lst 实测能差 29 万 px,
+       探针实测 re# 与轮次 1:1 同步、每轮 nInfo=0)。首轮该由下面 ourPad===null
+       那条按站点的 padding_top 起锚,不该被这里抢走。 */
+    if (firstSurv < 0 && children.length && st.nodeInfo.size) {
+      /* 重锚按**测量**保连续,不按账本取偏移。
+         这一支之后行号从 0 重排,偏移整个从"行号"搬到"padding-top"上扛;
+         若 padding-top 取站点账本(或 Σhei),而它们与行号当前表示的位置不一致,
+         换表示的那一瞬间差值就变成一次可见跳动 —— 实测进正文再返回
+         (list_all 被重建、fi 变成 -1,于是这一支被触发)时,同一张卡在同一个
+         scrollY=10566 下从文档 7453 挪到 7770,跳了 **317px**,用户看到的
+         就是"返回首页后不在原位"。
+         量出来的连续性等式:卡片边框顶 = wrap 边框顶 + paddingTop + 行号×UNIT,
+         行号归零后要原地不动 => paddingTop_new = gridTop_now - wrapTop_now。
+         账本该决定"文档有多长",不该决定"已经显示的内容跳不跳"。
+         一张都量不到(全 0 高)时才退回账本口径。 */
+      var wb = wrap.getBoundingClientRect();
+      var gTop = 1e9;
+      for (i = 0; i < recs.length; i++) {
+        if (recs[i].box > 0 && recs[i].docTop < gTop) gTop = recs[i].docTop;
+      }
       st.nodeInfo.clear();
-      st.ourPad = Math.max(0, Math.ceil(anchorOf(vm)));
+      anchored = true;
+      if (gTop < 1e8) {
+        st.ourPad = Math.max(0, Math.ceil(gTop - (wb.top + (window.scrollY || 0))));
+      } else {
+        var a0 = Math.max(0, Math.ceil(anchorOf(vm)));
+        var lstV = Math.max(0, Math.round(vm.last_scrolltop || 0));
+        if (lstV > 0 && Math.abs(a0 - lstV) > 200) a0 = lstV;
+        st.ourPad = a0;
+      }
     }
     var colEnd = [0, 0], colTop = [0, 0];
     for (c = 0; c < 2; c++) {
@@ -1235,13 +1552,23 @@
         if (it2.el.style.gridRow !== want) it2.el.style.gridRow = want;
         var wantCol = String(c + 1);
         if (it2.el.style.gridColumn !== wantCol) it2.el.style.gridColumn = wantCol;
-        st.nodeInfo.set(it2.el, {col: c, row: it2.row, h: it2.h});
+        var wkey = it2.key || it2.el;
+        st.nodeInfo.set(wkey, {col: c, row: it2.row, h: it2.h});
+        if (it2.key) placeMem.set(it2.key, {col: c, row: it2.row, h: it2.h});
       }
+    }
+    /* 身份记忆只按条数修剪:窗口推进后旧卡可能又被站点回插,那时它该回到
+       原来那一列那一行,而不是当新卡重排。 */
+    if (placeMem.size > PLACE_MAX) {
+      var over = placeMem.size - PLACE_MAX, it0 = placeMem.keys();
+      while (over-- > 0) { var dk = it0.next(); if (dk.done) break; placeMem.delete(dk.value); }
     }
     // 离场节点清账(Map 迭代中删除是安全的)
     st.nodeInfo.forEach(function (info, node) {
       var alive = false;
-      for (var q = 0; q < recs.length; q++) if (recs[q].el === node) { alive = true; break; }
+      for (var q = 0; q < recs.length; q++) {
+        if ((recs[q].key || recs[q].el) === node) { alive = true; break; }
+      }
       if (!alive) st.nodeInfo.delete(node);
     });
 
@@ -1251,6 +1578,7 @@
     // 条目"的分支里会把它直接写成 0(实测 fling 中触发),那时窗口还在列表中段,
     // 清行位会让文档高度塌回顶部、scrollY 被夹到 0(表现为"甩两下自己回到首页顶")。
     if (st.ourPad !== null && vm.padding_top === 0 &&
+        Math.round(vm.last_scrolltop || 0) <= 2 &&
         (!(vm.list_cur && vm.list_all) || vm.list_all.indexOf(vm.list_cur[0]) === 0)) {
       /* 站点把账归零且窗口真的回到已加载列表头部:下拉刷新/切分组,以及大步上插
          的"回到列表头"分支(站点此时把 padding_top 清零并整窗替换为头部一页)。
@@ -1258,18 +1586,88 @@
          之后硬甩回顶经常精确落进这个分支,y≈600 处 ourPad 仍钉在旧值(~2100px),
          网格整体被压到视口下方,顶部露出 1~2s 的整段空白(探针实测 1962ms)。
          "fling 中站点乱写 padding_top=0"的假重置窗口在列表中段(fi>0),已被
-         第二行的 indexOf===0 排除,不需要滚动位置来帮衬。 */
+         indexOf===0 排除;但又实测到恢复会话(h5_feed_data)等状态下 padTop=0 而
+         last_scrolltop≠0 的错位组合,此时清锚会把文档拽回去 —— 所以再加一道
+         last_scrolltop≤2:账面窗口顶不在 0 就不算真正的"回到头"。 */
+      /* 只在锚点确实钉在别处时,燃料才是脏的。这一支是**电平**条件:窗口停在
+         已加载列表头部时它每轮都成立(实测 y=3337 / fi=0 / lst=0 / padTop=0 的
+         常态),无条件清燃料就会和补燃料那一支对拍 —— 清成 0 → slack 少一屏 →
+         伺服补回 744 → 写 style 就是变异 → 观察器再进这一支。实测单页自转
+         41500 轮、燃料写回 82500 次,渲染主线程 97% 挂在微任务里,
+         用户看到的就是"触底不加载新微博、往上滑也滑不回去"。
+         锚点本来就是 0 时不动 DOM,回路自然断;真·下拉刷新/切组时 ourPad 是旧
+         深处的值(>0),该清的照样清一次。 */
+      if (Math.round(st.ourPad) > 0) setPadBottom(wrap, 0);
       st.ourPad = null;
       st.nodeInfo.clear();
-      wrap.style.paddingBottom = '';   // 刷新/切组:伺服燃料一并归零重计
+      contMem = null;   // 回顶是语义不是缺陷:别让按身份的记忆把校正做回来
+      placeMem.clear(); // 重排同理:刷新/切分组之后没有"原来那一列"要保住
+      placePad = null;
     }
     if (st.ourPad === null) {
-      /* 跟站点的账本变量,不读 DOM:此时 Vue 可能还没把 padding_top=0 刷进 style,
-         读 DOM 会把刚归零的锚又钉回旧值 */
-      st.ourPad = Math.max(0, Math.ceil(vm.padding_top || 0));
+      /* stFresh 只有一个来源:这份状态是刚建的 —— 容器节点换了人
+         (实测:进正文再返回首页,feed 组件重建,feedStates 按新 wrap 取不到旧状态)。
+         这时卡片上还挂着**上一份状态**写的行位与 padding,量出来的顶就是用户此刻
+         看到的位置;按量取锚,内容原地不动。按站点账本起锚会跳 —— 实测同一张卡在
+         同一个 scrollY=17910 下从文档 14747 被钉到 14983(账本 lst=14874 与行号表示
+         差 236px),用户看到的就是"返回首页后不在原位"。
+         重置分支(下拉刷新/切组)也走 ourPad=null,但它不带 stFresh,
+         所以仍然按账本归零 —— 那里"跳回顶部"是语义,不是缺陷。 */
+      var g0 = 1e9;
+      if (st.stFresh) {
+        for (i = 0; i < recs.length; i++) {
+          if (recs[i].box > 0 && recs[i].docTop < g0) g0 = recs[i].docTop;
+        }
+        st.stFresh = false;
+      }
+      if (restored) {
+        /* 行位是从身份记忆接过来的,那 padding 也必须用它当初被记录时的那一份 ——
+           两者是同一套坐标系(内容文档坐标 = pad + 行号×UNIT)。这时若按站点写的
+           padding_top 起锚,内容会整体被搬走:实测同一张卡的文档顶从 36596 变成
+           44261(差 7665px),列虽然不换了,但页面看着像"返回首页后跳到别处"。 */
+        anchored = true;
+        st.ourPad = placePad === null ? Math.max(0, Math.ceil(vm.padding_top || 0)) : placePad;
+      } else if (g0 < 1e8) {
+        anchored = true;      // 容器换人:同样按测量起锚,交给下面的身份校正保连续
+        st.ourPad = Math.max(0, Math.ceil(g0 - (wrap.getBoundingClientRect().top + (window.scrollY || 0))));
+      } else {
+        st.ourPad = Math.max(0, Math.ceil(vm.padding_top || 0));
+      }
     }
     var wantPad = Math.ceil(st.ourPad) + 'px';
     if (wrap.style.paddingTop !== wantPad) wrap.style.paddingTop = wantPad;
+
+    /* —— 落点校正:重锚这一轮把"记忆那张卡"拉回它原本的文档坐标 ——
+       测量连续性等式钉的是**这一轮量到的**网格顶,而站点可能已经在我们之前
+       把整棵树挪过(见上面 contMem 那段);按身份再补一次,用户盯着的那张卡才真的不动。
+       行号已写完、padding 已写完,这里读一次 rect 会强制排版 —— 只在重锚这条罕见
+       路径上发生(实测一整轮进/出首页 1~2 次),常态轮次 anchored=false 不付这笔钱。
+       校正后按实际落点重写记忆:夹在 0 处吃不掉的部分不结转,免得误差累积。 */
+    /* 从身份记忆复位 = 行位换了坐标系(状态重建/整窗换掉),与重锚同一种情形:
+       站点在这期间可能已经把它自己的 padding_top 写进 DOM,内容整体被搬走过 ——
+       实测只复位行位不做这一步时,同一张卡的文档顶从 36596 变成 44261(差 7665px),
+       列是不换了,可整页看着就是"返回首页后跳到大老远之外"。 */
+    if ((anchored || restored) && memIdx >= 0) {
+      var gotDoc = recs[memIdx].el.getBoundingClientRect().top + (window.scrollY || 0);
+      var errDoc = contMem.docTop - gotDoc;
+      if (Math.abs(errDoc) > 2) {
+        var fixPad = Math.max(0, Math.ceil(st.ourPad) + errDoc);
+        if (Math.abs(fixPad - st.ourPad) > 0.5) {
+          st.ourPad = fixPad;
+          wrap.style.paddingTop = Math.ceil(fixPad) + 'px';
+        }
+      }
+    }
+    if (refIdx >= 0 && refKey) {
+      var memDoc = refDoc;
+      if (anchored || restored) {
+        // 重锚轮:内容整体挪过,量过一次的落点才算数
+        memDoc = recs[refIdx].el.getBoundingClientRect().top + (window.scrollY || 0);
+      }
+      contMem = {key: refKey, docTop: memDoc, y: window.scrollY || 0, at: Date.now()};
+    }
+    /* 行位与 padding 是一套坐标系,落到最后一并记一笔(落点校正可能又动过 padding) */
+    placePad = st.ourPad;
 
     // —— padding-bottom 接管:滚动空间伺服 ——
     // padTop 定住之后,原版“文档随滚动净增”的机制就没了:原版每次窗口推进
@@ -1285,10 +1683,34 @@
     var vh2 = window.innerHeight || 744;
     var docH2 = document.documentElement.scrollHeight;
     var slack = docH2 - ((window.scrollY || 0) + vh2);
-    if (slack < vh2) {
-      var curPb = parseFloat(wrap.style.paddingBottom) || 0;
-      var wantPb2 = Math.ceil(curPb + (vh2 - slack)) + 'px';
-      if (wrap.style.paddingBottom !== wantPb2) wrap.style.paddingBottom = wantPb2;
+    /* 燃料必须有上限,而且上限要由"将来真会被渲染出来的内容"撑:
+       只按"还有已加载未渲染条目"放行是不够的 —— 实测断网下探时窗口停在
+       fi=166/cur=27(all=196,余粮 3 条),每趟仍判"有余粮"继续补一屏,
+       padding_bottom 从 744px 一路涨到 9672px、视口甩开网格、inView=0。
+       所以上限 = 窗口之后所有已加载条目的记账高 + 一屏在途余量;超出就回收
+       (每趟封顶 2400px、只回收视口之外的部分,不碰滚动位置)。
+       余粮为 0 时上限正好是一屏 —— 与原版"滚到底等加载"的天然行为一致;
+       翻页落地后条目进 list_all,上限自己抬高,不需要额外通知。 */
+    var curFi = (vm.list_cur && vm.list_cur.length && vm.list_all)
+      ? vm.list_all.indexOf(vm.list_cur[0]) : -1;
+    var allL = vm.list_all || [], curL = vm.list_cur || [], sumH = 0, nH = 0;
+    for (var mi = 0; mi < curL.length; mi++) {
+      var mh = curL[mi] && curL[mi].hei;
+      if (mh > 0) { sumH += mh; nH++; }
+    }
+    var meanH = nH ? sumH / nH : 0;          // 没量过高的条目按窗口均值估
+    var tailH = 0;
+    if (curFi >= 0) {
+      for (var ti = curFi + curL.length; ti < allL.length; ti++) {
+        tailH += (allL[ti] && allL[ti].hei) || meanH;
+      }
+    }
+    var capH = tailH + vh2;
+    var pbNum = parseFloat(wrap.style.paddingBottom) || 0;
+    if (pbNum > capH) {
+      setPadBottom(wrap, Math.max(0, Math.floor(pbNum - Math.min(2400, pbNum - capH))));
+    } else if (slack < vh2) {
+      setPadBottom(wrap, Math.min(capH, Math.ceil(pbNum + (vh2 - slack))));
     }
 
     // —— 提前翻页 ——
@@ -1302,7 +1724,15 @@
     if (!vm.is_request && !vm.is_refresh && !vm.re_do && vm.nextPageApi &&
         vm.list_all && vm.list_cur && vm.list_cur.length) {
       var tail = vm.list_all.indexOf(vm.list_cur[vm.list_cur.length - 1]);
-      if (tail >= 0 && vm.list_all.length - tail <= LOAD_AHEAD) vm.load_more(vm.nextPageApi);
+      if (tail >= 0 && vm.list_all.length - tail <= LOAD_AHEAD) {
+        /* 与泵的失败限流共用同一道闸(3s):网络失败时请求瞬断,re_do 只拦住本函数
+           一拍,下一批变异又进来 —— 两个发起口一起限流才算数 */
+        var nowLm = Date.now();
+        if (!vm.__bwLmAt || nowLm - vm.__bwLmAt > 2500) {
+          vm.__bwLmAt = nowLm;
+          vm.load_more(vm.nextPageApi);
+        }
+      }
     }
 
     // —— .hei 校准:记账 = 实际渲染高的一半 ——
@@ -1331,6 +1761,12 @@
        窗口推进过早,手机反而患上平板才有的病。归还交给 masonry() 的
        clearMasonry(refresh 每 250ms 会调到)。 */
     if (!WIDE.matches) return;
+    /* 全屏看图浮层开着的时候不接管信息流:它盖住整屏,这一轮排布没有任何可见收益,
+       而站点在浮层开合期间每帧都在重写这些卡片节点,我们每收到一批变异就同步排一轮
+       (19 个 rect + 19 个 getComputedStyle)。实测一次"开图 → 上滑 → 收起"的路径上
+       排布跑 1100+ 轮、渲染主线程 100%。
+       收起时 syncGalleryOverlay 在换态那一支补排,不靠轮询。 */
+    if (pswpOpen()) return;
     var wraps = document.querySelectorAll(MASON_SEL);
     for (var w = 0; w < wraps.length; w++) {
       var wrap = wraps[w];
@@ -1363,6 +1799,9 @@
   }
 
   function clearMasonry() {
+    contMem = null;      // 交还布局:按身份的记忆随之作废,单列世界由站点自己接管
+    placeMem.clear();
+    placePad = null;
     var els = document.querySelectorAll('.wb-item-wrap, .profile-header, .lite-btn-more');
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
@@ -1403,10 +1842,23 @@
       }
     }
   }
-
-  /* 信息流 wrap 的变异(站点写 padding / 增删卡片)在这里同步处理:
-     微任务里、paint 之前,行位与记账一次到位,错位帧不会被画出来 */
   var masonEl = null, masonObs = null;
+  /* 变异驱动的排布要限流:观察器回调是微任务,站点自己刷信息流时一批接一批,
+     每轮都同步排布。实测风暴里一秒 380 轮,渲染主线程被这条"什么都没写"的路径吃满
+     (CDP 120s 不回话,只剩合成器在滚,页面看着就是死的)。
+     1 秒窗口内前 40 轮同步排 —— 冷启动首批与整窗替换要当帧落位,不然会先上一屏
+     未定位的卡再整屏挪位(实测单卡 -185px);超过 40 轮说明遇上了风暴,改走
+     masonry() 的 120ms 防抖,把每秒排布次数压回个位数,阵风过去自然恢复。 */
+  var moPass = {n: 0, from: 0};
+  function masonryFromMutation() {
+    var now = Date.now();
+    if (now - moPass.from > 1000) { moPass.from = now; moPass.n = 0; }
+    if (++moPass.n <= 40) {
+      try { layoutMasonry(); } catch (e) { /* ignore */ }
+    } else {
+      masonry();
+    }
+  }
   function watchFeed() {
     var el = document.querySelector('#app .main-wrap .pannelwrap');
     if (el === masonEl) return;
@@ -1414,9 +1866,7 @@
     masonEl = el;
     if (!el) return;
     try {
-      masonObs = new MutationObserver(function () {
-        try { layoutMasonry(); } catch (e) { /* ignore */ }
-      });
+      masonObs = new MutationObserver(function () { masonryFromMutation(); });
       masonObs.observe(el, {attributes: true, childList: true, subtree: true});
       /* 挂上就立即排一次:冷启动首批卡(以及容器被整换后的幸存卡)不能再等
          refresh 的 250ms + masonry 的 120ms 节流 —— 那 ~370ms 里未定位的卡
@@ -1558,6 +2008,7 @@
       placeComposeAvatar();
       allowComposeThumbnails();
       syncGalleryOverlay();
+      clampNineGrid();
       /* 悬浮导航与发博按钮只在四个主 tab 出现,其余一律收掉:
          正文页 / 私信会话(那条输入框在常规流里,胶囊压上去实测重叠 388x39) / 撰写 /
          设置族(老架构 #box + 服务端直出子页) / 头条文章 / 超话 / 热搜条目页

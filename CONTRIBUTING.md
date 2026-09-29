@@ -10,7 +10,7 @@
 2. `local.properties` 写 `sdk.dir=…`（该文件不会进仓库）。
 3. `./gradlew assembleDebug` 能通过就算环境就绪。产物会同时出现在
    `app/build/outputs/apk/debug/` 与仓库同级的 `release/` 下。
-4. 想出能安装的 release 包按 README 的「构建」配 `keystore.properties`。
+4. 要出能安装的 release 包，按 README「构建」一节配 `keystore.properties`。
    仓库只有一个 tag 触发的发布工作流：推一个 `v*` 标签，它会用 GitHub Secrets 里的密钥
    签名构建，校验产物确实被签名，然后建 Release 并挂上 APK 与 sha256。
    PR 上没有编译检查，别人提的改动要自己拉下来编一遍再决定合不合。
@@ -30,16 +30,16 @@
 
 改样式前必须知道的三件事：
 
-- **CSS 字符串一行一条**。这些脚本把样式表拼成 JS 字符串数组，一行一个 `'…',` 元素；
-  写成跨行的单个字符串会让**整个脚本语法错、静默完全不注入**（页面掉回站点原始样式，
-  没有任何报错）。提交前跑一遍：`for f in app/src/main/assets/*.js; do node --check "$f"; done`
-- **站点同时存在三套页面架构**：新版 Vue SPA、老版服务端直出（`#box` 作用域）、
+- 这些脚本把样式表拼成 JS 字符串数组，一行一个 `'…',` 元素。写成跨行的单个字符串会让
+  **整个脚本语法错、静默完全不注入**（页面掉回站点原始样式，没有任何报错）。提交前跑一遍：
+  `for f in app/src/main/assets/*.js; do node --check "$f"; done`
+- 站点同时存在三套页面架构：新版 Vue SPA、老版服务端直出（`#box` 作用域）、
   以及 `card.weibo.com` 的头条文章页。同一类页面在不同架构下类名不同
   （例如设置族在直出页是 `#box` 里的老类名，在 SPA 里是 Vue 组件；
   账号安全页在 `security.weibo.com` 用的是更老的一套）。
   只按一种架构写的规则，在另一种上会静默不生效。
-- **注入是幂等的**。脚本会在 `onPageStarted` 与 `onPageFinished` 各跑一次，
-  SPA 内部路由跳转还会再跑。任何"append 一个节点"的写法都要先查是否已存在，
+- 注入脚本会重跑：`onPageStarted` 与 `onPageFinished` 各一次，SPA 内部路由跳转还要再来一次。
+  任何"append 一个节点"的写法都要先查是否已存在，
   否则会出现叠两层控件、多颗返回球这类问题。
 
 ## 自测
@@ -59,7 +59,7 @@ adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>
 
 ## 版本号与更新日志
 
-- 版本号规则见 README；改版本只改 `app/build.gradle.kts` 里的 `pulseVersion` 一行，
+- 版本号规则见 `CHANGELOG.md` 开头；改版本只改 `app/build.gradle.kts` 里的 `pulseVersion` 一行，
   `versionCode` 由它编码得出，不要手写。
 - 用户可见的改动要在 `CHANGELOG.md` 的 `[Unreleased]` 下记一笔
   （`Added` / `Changed` / `Fixed`，破坏性变更进 `Removed` 或单独说明）。

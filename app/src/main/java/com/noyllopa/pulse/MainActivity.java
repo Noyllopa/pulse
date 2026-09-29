@@ -831,7 +831,7 @@ public class MainActivity extends AppCompatActivity {
          * 只能由 media_save.js 把直链报上来。报上来之后**不直接落盘** ——
          * 2026-09-28 用户要求:长按给的是菜单,和长按图片那条一致;
          * 直接存等于把手势当确认,误触一次相册里就多一条片子。
-         * (看图器里的真视频长按不下菜单,改由页面自己切倍速 —— 同一条要求。)
+         * (看图器里的真视频长按不下菜单,改由页面自己按住切倍速 —— 同一条要求。)
          */
         @JavascriptInterface
         public void mediaMenu(final String url) {

@@ -8,7 +8,7 @@ plugins {
 
 /* 版本号:主版本.次版本.修订号[-预发布标识]。
    正式版不带任何后缀;预发布只允许 alpha / beta / rc 加序号。改版本只改这一行。 */
-val pulseVersion = "1.0.2-alpha.1"
+val pulseVersion = "1.0.3-alpha.1"
 
 /* Android 只认 versionCode 这一个整数,所以把三段号与预发布阶段编进位段:
    主*1e6 + 次*1e4 + 修订*100 + 预发布槽(alpha/beta/rc 各占 32 格)。

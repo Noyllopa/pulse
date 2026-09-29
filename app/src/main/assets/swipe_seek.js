@@ -1,11 +1,12 @@
 /**
- * pulse 视频滑动快进快退。
+ * pulse 视频播放器上的两件事:滑动快进快退 + 点开播放时默认给最高画质。
  *
- * 只用站点自己的播放器(video.js)与它现成的时间显示:横向拖动直接改 video.currentTime,
- * 进度条与时间文本由站点自己更新,不另造控制层。
+ * 只用站点自己的东西:进度走 video.js 现成的 currentTime(进度条与时间文本由站点更新),
+ * 画质调站点播放器自己的 `player.src()` 与它自带的 `qualityChange` 事件 —— 不模拟点击、
+ * 不弹它的清晰度菜单,用户看不到换档过程。不另造控制层。
  * 纵向手势仍交给页面滚动,进度条上的拖动也仍归站点。
  * 全屏看图(.pswp)里只有真视频吃这手势,live 图与动图交给站点的翻页。
- * 顺带一件不相干但同宿主的事:按到播放器时把视频真实比例报给原生,全屏方向按它定。
+ * 顺带一件同宿主的事:按到播放器时把视频真实比例报给原生,全屏方向按它定。
  */
 (function () {
   if (!document.documentElement) return;
@@ -34,6 +35,15 @@
 
   function videoOf(host) {
     return host.querySelector('video') || host;
+  }
+
+  /* 只接管"点开在播"的那层。信息流里的缩略图是 div.mwb-video.mwbv-play 挂在
+     div.card-video 下,与站点真正播放用的那颗 div.video-player.mwb-layer 里的
+     .video-js 是两个不同节点(实测)—— 在缩略图上横滑既不该跳进度,也不该把
+     本该属于卡片的横向手势吃掉(绑上还会顺带写 touch-action:pan-y)。
+     看图器 .pswp 里照旧按下面的时长规则决定让不让给翻页。 */
+  function seekable(host) {
+    return !!(host.closest && host.closest('.mwb-layer, .pswp'));
   }
 
   /* 站点的全屏看图(photoswipe)本身是个横向翻页的容器,而 live 图/动图在它里面
@@ -89,6 +99,105 @@
     hudTimer = setTimeout(function () { el.classList.remove('on'); }, 700);
   }
 
+  /* ---- 点开播放时默认切到最高画质:走站点自己的播放器接口,不模拟点击 ----
+     站点默认给"标清"(实测点开一条 720p 的片子,在播的是 853×480 那一路)。
+     它的清晰度控件是 video.js 组件 `QualityButton`,菜单项是它的 MenuItem,
+     站点自己换档的那段代码是:
+        currentTime 存一下 → player.src({src,type:'video/mp4'}) → load() → play()
+        → currentTime(回去) → 给自己 addClass('vjs-selected')
+        → trigger('toggleMenu') → trigger('qualityChange', options)
+     其中 `toggleMenu` 会被 QualityButton.handleClick 接去翻 `.mwb-show-menu` ——
+     **清晰度菜单就此弹在屏幕上**,那就是用户看到的"点击过程"。
+     所以这里不 dispatch 任何 click,只按同样的顺序把换档那几步走一遍,
+     并且不发 toggleMenu:标签与选中态由站点自己的 `qualityChange` 监听(updateLabel)负责。
+     档位高低用站点自带的 `qualityList[].sign`(越大越高),不再靠文案去猜。 */
+  var Q_TRIES = 5;      // 组件树是异步建起来的,读不到时最多再等几拍
+  var Q_EVERY = 400;
+
+  function playerOf(host) {
+    if (!window.videojs) return null;
+    var el = (host.classList && host.classList.contains('video-js'))
+      ? host : host.querySelector('.video-js');
+    if (!el) return null;
+    try { return window.videojs(el) || null; } catch (e) { return null; }
+  }
+
+  /** 组件树里的 QualityButton 与它菜单下的档位项 */
+  function qualityCtl(player) {
+    var btn = null;
+    (function walk(c) {
+      if (btn) return;
+      var n = null;
+      try { n = typeof c.name === 'function' ? c.name() : null; } catch (e) { /* ignore */ }
+      if (n === 'QualityButton') { btn = c; return; }
+      (c.children_ || []).forEach(walk);
+    })(player);
+    if (!btn) return null;
+    var items = [];
+    (btn.children_ || []).forEach(function (k) {
+      if (k.el_ && k.el_.classList && k.el_.classList.contains('vjs-menu')) {
+        items = k.children_ || [];
+      }
+    });
+    return {btn: btn, items: items};
+  }
+
+  /** {top, atTop}:top = 该切过去的那一项;atTop = 已经在最高档 */
+  function readQuality(ctl) {
+    var list = (ctl.btn.options_ && ctl.btn.options_.qualityList) || [];
+    var topSrc = null, topSign = -1, i;
+    for (i = 0; i < list.length; i++) {
+      var q = list[i];
+      if (q && q.src && (q.sign || 0) > topSign) { topSign = q.sign || 0; topSrc = q.src; }
+    }
+    if (!topSrc) return {top: null, atTop: false};
+    var out = null, selSrc = null;
+    for (i = 0; i < ctl.items.length; i++) {
+      var mi = ctl.items[i];
+      var o = mi.options || mi.options_;
+      if (!o || !o.src) continue;
+      if (mi.el_ && mi.el_.classList.contains('vjs-selected')) selSrc = o.src;
+      if (o.src === topSrc) out = {item: mi, opt: o};
+    }
+    if (!out) return {top: null, atTop: false};
+    return out.opt.src === selSrc ? {top: null, atTop: true} : {top: out, atTop: false};
+  }
+
+  /** 站点自己那套换档动作,原样走一遍:进度与播放状态都不丢,也不碰弹层 */
+  function applyQuality(player, ctl, out) {
+    var keep = player.currentTime();
+    var wasPaused = player.paused();
+    player.src({src: out.opt.src, type: 'video/mp4'});
+    player.load();
+    if (!wasPaused) player.play();
+    player.currentTime(keep);
+    out.item.addClass('vjs-selected');            // 站点在 handleClick 里就是这一句
+    player.trigger('qualityChange', out.opt);     // 标签/其余项的选中态交回站点
+  }
+
+  function raiseQuality(host) {
+    /* .mwb-video 与它里面的 .video-js 都会被绑上,play 的捕获阶段两家各进一次;
+       标记要挂在共同的浮层根上,否则两边会同时换一次档。 */
+    var root = (host.closest && host.closest('.mwb-layer, .pswp')) || host;
+    if (root.__bwQDone) return;
+    var tries = 0;
+    (function step() {
+      var player = playerOf(host);
+      var ctl = player ? qualityCtl(player) : null;
+      var r = ctl ? readQuality(ctl) : {top: null, atTop: false};
+      if (r.atTop) { root.__bwQDone = true; return; }
+      if (!r.top) {                              // 组件树还没建好:再等一拍
+        if (++tries < Q_TRIES) setTimeout(step, Q_EVERY);
+        else root.__bwQDone = true;              // 等不到就不管这条片子
+        return;
+      }
+      root.__bwQDone = true;
+      try {
+        applyQuality(player, ctl, r.top);
+      } catch (e) { /* ignore */ }
+    })();
+  }
+
   function bind(host) {
     if (host.__bwSeekBound) return;
     host.__bwSeekBound = true;
@@ -105,6 +214,9 @@
     }
     host.addEventListener('pointerdown', pushAspect, true);
     host.addEventListener('loadedmetadata', pushAspect, true);
+    /* play 不冒泡,但捕获阶段照样经过宿主。站点自己也会在换档后重新触发 play,
+       所以 raiseQuality 用 __bwQDone 挡住第二次,不会来回切。 */
+    host.addEventListener('play', function () { raiseQuality(host); }, true);
 
     var startX = 0, startY = 0, startTime = 0, scrubbing = false, video = null;
 
@@ -158,11 +270,15 @@
 
   function scan() {
     var hosts = document.querySelectorAll('.video-js, .mwb-video, .video-container');
-    for (var i = 0; i < hosts.length; i++) bind(hosts[i]);
+    for (var i = 0; i < hosts.length; i++) {
+      if (seekable(hosts[i])) bind(hosts[i]);
+    }
     var vids = document.querySelectorAll('video');
     for (var j = 0; j < vids.length; j++) {
       // 没有 video.js 包装的裸 video:自身作为手势宿主
-      if (!vids[j].closest || !vids[j].closest('.video-js,.mwb-video,.video-container')) bind(vids[j]);
+      if (!vids[j].closest || !vids[j].closest('.video-js,.mwb-video,.video-container')) {
+        if (seekable(vids[j])) bind(vids[j]);
+      }
     }
   }
 
