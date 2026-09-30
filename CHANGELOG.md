@@ -12,6 +12,19 @@
 
 ## [Unreleased]
 
+## [1.0.3-alpha.4] — 2026-09-30
+
+### Fixed
+
+- 平板首页滑动后用手指刹停，会看到某张微博跳到另一栏（有时一次跳好几张）。
+  根因是"回到列表头部就清掉排布账"那一步做成了每轮都成立：首页头几屏里这个条件
+  一直满足，于是账每轮被清空、下一轮所有卡片都当新出现重新分栏，卡片高度一变
+  （图片加载完、或刹停把重排留在肉眼可见的那一帧）就成批换列。现在清账和改锚点
+  受同一个条件保护，只有锚确实钉在别处时才算一次真重置。
+  实测：同样的手势组合下，清账事件从 138 条降到 0；从深处甩回顶部时仍然照常清一次。
+- 顺带补一道兜底：某张卡即使查不到账，只要它身上还挂着上一轮写的列与行，就按它继续，
+  不再当新卡重排。真重置时这些残留值会被一并抹掉，不会把旧位置带给新微博。
+
 ## [1.0.3-alpha.3] — 2026-09-30
 
 ### Fixed
@@ -183,7 +196,8 @@
 - 深色顶栏切换瞬间的闪烁：已按"预热 `backdrop-filter`"改动，但缺少可复现证据，未验证。
 - 注入规则依赖站点类名，微博改版会导致部分页面样式回退。
 
-[Unreleased]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.3...HEAD
+[Unreleased]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.4...HEAD
+[1.0.3-alpha.4]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.3...v1.0.3-alpha.4
 [1.0.3-alpha.3]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.2...v1.0.3-alpha.3
 [1.0.3-alpha.2]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.1...v1.0.3-alpha.2
 [1.0.3-alpha.1]: https://github.com/Noyllopa/pulse/compare/v1.0.2-alpha.1...v1.0.3-alpha.1

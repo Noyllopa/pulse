@@ -974,6 +974,18 @@
   // 凡是"直接子节点是信息流卡"的容器都走瀑布:首页 .pannelwrap 与我的页列表同一套
   var MASON_SEL = '#app div:has(> .wb-item-wrap)';
 
+  /* 把元素身上现有的 inline 列/行读回成排布账(账查不到时的兜底事实来源)。
+     行位写作 "N / span M",N 是 1 起的网格行号;账里存 0 起的 row 与高度 h。 */
+  function domPlacement(el) {
+    var gc = el.style.gridColumn, gr = el.style.gridRow;
+    if (!gc || !gr) return null;
+    var m = /^(\d+)\s*\/\s*span\s*(\d+)$/.exec(gr);
+    var col = parseInt(gc, 10) - 1;
+    if (!m || !(col === 0 || col === 1)) return null;
+    var span = Math.max(1, parseInt(m[2], 10) || 1);
+    return {col: col, row: Math.max(0, (parseInt(m[1], 10) || 1) - 1), h: span * MASON_UNIT};
+  }
+
   // —— 固定行位状态(只挂在带虚拟列表记账的信息流 wrap 上)——
   function FeedState() {
     this.vm = null;            // 站点 feed 组件($refs.cont 指回 wrap 且带 list_all)
@@ -1438,6 +1450,18 @@
         prev = placeMem.get(recs[i].key);
         if (prev) restored++;      // 行位是从上一份状态那儿接过来的
       }
+      if (!prev) {
+        /* 两本账都查不到,但元素身上还挂着我们上一轮写的列与行 —— 以 DOM 自己为准。
+           否则这一张会被当"新卡"重排:一次低幸存的排布能把屏幕上五六张已显示的卡
+           **成批换列**(2026-09-30 实测刹停瞬间同帧 5 条 col 事件,3 张 2→1、2 张 1→2,
+           用户看到的就是"某张卡跳到另一栏")。账为什么会空是另一回事(键取不到、
+           状态换人),这里先把"已经画在屏幕上的位置"抬成事实来源。 */
+        prev = domPlacement(recs[i].el);
+        if (prev) {
+          if (recs[i].key) placeMem.set(recs[i].key, prev);
+          st.nodeInfo.set(pkey, prev);
+        }
+      }
       if (!prev) continue;
       recs[i].col = prev.col; recs[i].row = prev.row; recs[i].h = prev.h;
       cols[prev.col].push(recs[i]);
@@ -1597,12 +1621,28 @@
          用户看到的就是"触底不加载新微博、往上滑也滑不回去"。
          锚点本来就是 0 时不动 DOM,回路自然断;真·下拉刷新/切组时 ourPad 是旧
          深处的值(>0),该清的照样清一次。 */
-      if (Math.round(st.ourPad) > 0) setPadBottom(wrap, 0);
-      st.ourPad = null;
-      st.nodeInfo.clear();
-      contMem = null;   // 回顶是语义不是缺陷:别让按身份的记忆把校正做回来
-      placeMem.clear(); // 重排同理:刷新/切分组之后没有"原来那一列"要保住
-      placePad = null;
+      /* 2026-09-30 同一道保护当时只加在了 setPadBottom 上,四行**账目清理留在门外**
+         —— 而 ourPad 在首页头部本来就是 0,于是这一支每轮都成立、每轮都清空
+         nodeInfo 与 placeMem:下一轮所有卡都算"新卡",整窗重新分栏。卡片高度一变
+         (图片加载完、或刹停让重排落在肉眼可见的一帧)就成批换列 —— 实测刹停一次
+         同帧 5 条换栏(3 张 2→1、2 张 1→2),而 reset 事件在浅处每轮都打(13 次手势
+         138 条,ourPad 全是 0)。清理必须和 padding 那一行受同一个"锚确实钉在别处"的
+         边沿保护,不然这里根本不是电平,是每轮都开火的自毁。 */
+      if (Math.round(st.ourPad) > 0) {
+        setPadBottom(wrap, 0);
+        st.ourPad = null;
+        st.nodeInfo.clear();
+        contMem = null;   // 回顶是语义不是缺陷:别让按身份的记忆把校正做回来
+        placeMem.clear(); // 重排同理:刷新/切分组之后没有"原来那一列"要保住
+        placePad = null;
+        /* 配套:刷新/切组后 DOM 上残留的旧列/行也必须抹掉 —— 否则下一轮
+           domPlacement 那条兜底会把"上一批微博的位置"接给新卡片。 */
+        for (var q = 0; q < wrap.children.length; q++) {
+          var kid = wrap.children[q];
+          if (kid.style.gridColumn) kid.style.gridColumn = '';
+          if (kid.style.gridRow) kid.style.gridRow = '';
+        }
+      }
     }
     if (st.ourPad === null) {
       /* stFresh 只有一个来源:这份状态是刚建的 —— 容器节点换了人
