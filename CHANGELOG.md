@@ -12,6 +12,18 @@
 
 ## [Unreleased]
 
+## [1.0.3-alpha.3] — 2026-09-30
+
+### Fixed
+
+- 深色档点进楼中楼页（评论下面那串回复展开成的整页）时，卡片以下会露出一大块比卡面还亮
+  的灰底。那是站点铺在列表底下的一层固定底，写死了浅灰，深色下被系统加深成 37 一档，
+  而列表卡只盖住自己那一段。现在这层改用页面底色：深色回到 #111111，浅色与原来差 1 档，
+  观感不变。
+- 深色档楼中楼页里，评论与它下方回复之间有一条白线。同样是站点的行边框（声明是透明色，
+  深色下被加深成一条实心白线）与我们自己的分隔线叠在一起。去掉那条边框，分隔仍由我们的
+  发丝线承担；浅深两档、手机与平板都量过，线的位置和粗细没变。
+
 ## [1.0.3-alpha.2] — 2026-09-30
 
 ### Changed
@@ -171,7 +183,8 @@
 - 深色顶栏切换瞬间的闪烁：已按"预热 `backdrop-filter`"改动，但缺少可复现证据，未验证。
 - 注入规则依赖站点类名，微博改版会导致部分页面样式回退。
 
-[Unreleased]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.2...HEAD
+[Unreleased]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.3...HEAD
+[1.0.3-alpha.3]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.2...v1.0.3-alpha.3
 [1.0.3-alpha.2]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.1...v1.0.3-alpha.2
 [1.0.3-alpha.1]: https://github.com/Noyllopa/pulse/compare/v1.0.2-alpha.1...v1.0.3-alpha.1
 [1.0.2-alpha.1]: https://github.com/Noyllopa/pulse/compare/v1.0.1-alpha.1...v1.0.2-alpha.1
