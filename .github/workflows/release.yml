@@ -54,8 +54,9 @@ jobs:
       - name: 构建并签名
         run: |
           set -eo pipefail
+          # runner 在境外,不吃国内镜像(见 settings.gradle.kts 的注释)
           ./gradlew assembleRelease --no-daemon --stacktrace -Ppulse.outDir=dist \
-            2>&1 | tee "$RUNNER_TEMP/build.log"
+            -Ppulse.noMirror 2>&1 | tee "$RUNNER_TEMP/build.log"
 
       # 日志正文要登录才看得到;提成 annotation 才能被未登录的 API 读到
       - name: 失败时抛出关键日志

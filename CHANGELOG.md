@@ -12,6 +12,16 @@
 
 ## [Unreleased]
 
+## [1.0.3-alpha.2] — 2026-09-30
+
+### Changed
+
+- 正文页评论的楼中楼不再整块填底色，改成块上沿一条发丝线加站点自己的缩进。
+  原来那层底色深浅两档都只与卡面差 6 档：既看不出"这是一组回复"，又多出一大块色块。
+  转发引用块（转评里的原文）仍保留填色，那条是滚动时靠色块好认才定的。
+- 发布流水线不再走国内 Maven 镜像：上一次发 `1.0.3-alpha.1` 就是镜像回 502 挂在构建那一步。
+  本地构建照旧默认吃镜像。
+
 ## [1.0.3-alpha.1] — 2026-09-30
 
 ### Added
@@ -161,7 +171,8 @@
 - 深色顶栏切换瞬间的闪烁：已按"预热 `backdrop-filter`"改动，但缺少可复现证据，未验证。
 - 注入规则依赖站点类名，微博改版会导致部分页面样式回退。
 
-[Unreleased]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.1...HEAD
+[Unreleased]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.2...HEAD
+[1.0.3-alpha.2]: https://github.com/Noyllopa/pulse/compare/v1.0.3-alpha.1...v1.0.3-alpha.2
 [1.0.3-alpha.1]: https://github.com/Noyllopa/pulse/compare/v1.0.2-alpha.1...v1.0.3-alpha.1
 [1.0.2-alpha.1]: https://github.com/Noyllopa/pulse/compare/v1.0.1-alpha.1...v1.0.2-alpha.1
 [1.0.1-alpha.1]: https://github.com/Noyllopa/pulse/releases/tag/v1.0.1-alpha.1

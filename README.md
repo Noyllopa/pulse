@@ -5,7 +5,7 @@ m.weibo.cn 的安卓客户端。WebView 套壳，样式和一部分交互靠注�
 深浅色跟系统走。看图器里长按下载图片，视频按住走两倍速、松手还原，live 图长按
 从头重播，发微博时点缩略图可以放大看。
 
-1.0.3-alpha.1，早期预发布。没有自动化测试，改动只在我自己的两台模拟器
+1.0.3-alpha.2，早期预发布。没有自动化测试，改动只在我自己的两台模拟器
 （手机、平板各一台）上验证过；微博一改版，它就可能坏。
 
 ## 下载
@@ -33,7 +33,7 @@ APK 在 [Releases](https://github.com/Noyllopa/pulse/releases) 页面，
 把下载的 APK 传到手机点开。接了 adb 的话：
 
 ```bash
-adb install -r pulse-1.0.3-alpha.1-release.apk
+adb install -r pulse-1.0.3-alpha.2-release.apk
 ```
 
 自己构建的话产物在 `app/build/outputs/apk/debug/app-debug.apk`，一样能装。
