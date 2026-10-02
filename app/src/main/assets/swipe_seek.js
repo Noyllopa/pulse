@@ -43,6 +43,9 @@
      本该属于卡片的横向手势吃掉(绑上还会顺带写 touch-action:pan-y)。
      看图器 .pswp 里照旧按下面的时长规则决定让不让给翻页。 */
   function seekable(host) {
+    /* 看图器里我们自搭的那条控件容器也带 video-js 类(为了吃站点的样式),
+       别把它当播放器绑一遍 —— 它里面没有 video,绑上只会多一套手势与重试。 */
+    if (host.classList && host.classList.contains('bw-gbar')) return false;
     return !!(host.closest && host.closest('.mwb-layer, .pswp'));
   }
 
@@ -176,27 +179,479 @@
   }
 
   function raiseQuality(host) {
-    /* .mwb-video 与它里面的 .video-js 都会被绑上,play 的捕获阶段两家各进一次;
-       标记要挂在共同的浮层根上,否则两边会同时换一次档。 */
+    /* 去重要按"这条片子的源地址"记,不能只挂一个布尔标记:
+       `.mwb-layer` 这个节点在站点的 SPA 里是常驻的(关掉再点开下一条,还是同一个节点),
+       布尔标记会把第一条之后的所有片子全挡掉 —— 实测第一条升到 1280x720、
+       第二条就停在站点默认那路 853x480。
+       记的是一本"这条片子已处理过的源"账:同一条片子会被绑两次(.mwb-video 与它里面的
+       .video-js,play 的捕获阶段各进一次),换档后站点还会再发一次 play;
+       把这片子全部档位的地址都记进去,也就顺带尊重了用户/站点之后手动调档
+       —— 手动降到标清不该被我们立刻顶回最高。
+       读到一本不含当前地址的新账 = 换了一条片子,重新起账。 */
     var root = (host.closest && host.closest('.mwb-layer, .pswp')) || host;
-    if (root.__bwQDone) return;
+    var vd = root.querySelector ? root.querySelector('video') : null;
+    var key = vd ? (vd.currentSrc || vd.src || '') : '';
+    var seen = root.__bwQSeen;
+    if (seen && seen.indexOf(key) >= 0) return;
+    seen = root.__bwQSeen = [key];
     var tries = 0;
     (function step() {
       var player = playerOf(host);
       var ctl = player ? qualityCtl(player) : null;
       var r = ctl ? readQuality(ctl) : {top: null, atTop: false};
-      if (r.atTop) { root.__bwQDone = true; return; }
+      if (r.atTop) return;
       if (!r.top) {                              // 组件树还没建好:再等一拍
         if (++tries < Q_TRIES) setTimeout(step, Q_EVERY);
-        else root.__bwQDone = true;              // 等不到就不管这条片子
-        return;
+        return;                                  // 等不到就不管这条片子
       }
-      root.__bwQDone = true;
+      var list = (ctl.btn.options_ && ctl.btn.options_.qualityList) || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].src && seen.indexOf(list[i].src) < 0) seen.push(list[i].src);
+      }
       try {
         applyQuality(player, ctl, r.top);
+        markQuality(host);
       } catch (e) { /* ignore */ }
     })();
   }
+
+  /* 画质菜单里"当前这一档"的标记。站点只给自己点中的那个 li 挂 vjs-selected,换档后它会把
+     这批 li 重建一遍(类随之丢掉) —— 实测在播标清时菜单三项全是白字,看不出哪档是当前;
+     而倍速那颗的选中项是带色的,两处不一致。这里按那颗自己显示的文字(它就是当前档)
+     把对应的 li 标回来,颜色与倍速那颗一起走主题蓝(见 theme.js)。
+     时机只有两处需要:按下落在画质那颗上(菜单将开)、我们自己升档之后 —— 菜单只在这两种
+     场合被人看到。写的是类与 aria,不碰 video.js 的 selected() —— 那会 trigger('select'),
+     站点可能接去再换一次源。 */
+  function markQuality(host) {
+    var btn = host.querySelector ? host.querySelector('.mwb-quality-button') : null;
+    if (!btn && host.classList && host.classList.contains('mwb-quality-button')) btn = host;
+    if (!btn) return;
+    var val = btn.querySelector('.mwb-quality-button-value');
+    var cur = (val ? val.innerText : '').replace(/\s+/g, '');
+    if (!cur) return;
+    var items = btn.querySelectorAll('.vjs-menu-item');
+    for (var i = 0; i < items.length; i++) {
+      var t = items[i].querySelector('.vjs-menu-item-text') || items[i];
+      var on = (t.innerText || '').replace(/\s+/g, '') === cur;
+      items[i].classList.toggle('vjs-selected', on);
+      items[i].setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+  }
+
+  /* ---- 倍速:插在站点那颗画质按钮的左边,菜单沿用 video.js 那一套类 ----
+     站点画质那颗是 `.mwb-quality-button`(绝对定位,right:60px、宽 24),弹层是
+     `.vjs-menu > .vjs-menu-content > li.vjs-menu-item`,选中项加 `vjs-selected`(站点原色是橙,
+     两处菜单的字色都改成主题蓝,见 theme.js)。倍速这颗照同一套结构建(形状/选中态/字号都是
+     站点自己的 CSS,不另画一份),
+     只把"开"这一态挂在自己的 `bw-speed-open` 上 —— 站点那条 `.mwb-show-menu` 只认它自己的按钮。
+     变速只走 video.js 现成的 `player.playbackRate()`(拿不到播放器就退到 video.playbackRate),
+     不碰站点的画质组件,也不模拟它的点击。 */
+  var RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+  /* 按钮上:没调过写"倍速"(与站点那颗同字号同字族),调过写当前档位。
+     菜单里每一项一律写档位 —— "倍速"是控件的名字,不是一档速度。 */
+  function speedLabel(r) {
+    return r === 1 ? '倍速' : String(r) + 'x';
+  }
+
+  function rateText(r) {
+    return String(r) + 'x';
+  }
+
+  function ctlBarOf(host) {
+    var q = host.querySelector ? host.querySelector('.mwb-quality-button') : null;
+    if (!q && host.classList && host.classList.contains('mwb-quality-button')) q = host;
+    return q && q.parentElement ? q.parentElement : null;
+  }
+
+  function videoElOf(host) {
+    var v = host.querySelector ? host.querySelector('video') : null;
+    if (!v && host.tagName === 'VIDEO') v = host;
+    return v;
+  }
+
+  function speedOf(host) {
+    var v = videoElOf(host);
+    if (typeof host.__bwSpeed === 'number') return host.__bwSpeed;
+    if (v && isFinite(v.playbackRate) && v.playbackRate !== 1) return v.playbackRate;
+    return typeof window.__bwSpeedPref === 'number' ? window.__bwSpeedPref : 1;
+  }
+
+  function paintSpeed(el, r) {
+    var box = el.querySelector('.bw-speed-value');
+    if (box) box.textContent = speedLabel(r);
+    [].forEach.call(el.querySelectorAll('.vjs-menu-item'), function (li) {
+      var on = parseFloat(li.getAttribute('data-bw-speed')) === r;
+      li.classList.toggle('vjs-selected', on);
+      li.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  }
+
+  /** 往一个 .bw-speed 节点上装出档位菜单;读写走传进来的 api(播放器路径与看图器路径各一套) */
+  function mountSpeed(el, api) {
+    if (el.querySelector('.vjs-menu')) return el;      // 装过了
+    el.classList.add('vjs-menu-button', 'vjs-menu-button-popup', 'vjs-control');
+    el.innerHTML = '<span class="bw-speed-value"></span>' +
+      '<div class="vjs-menu"><ul class="vjs-menu-content" role="menu"></ul></div>';
+    var ul = el.querySelector('.vjs-menu-content');
+    RATES.forEach(function (r) {
+      var li = document.createElement('li');
+      li.className = 'vjs-menu-item';
+      li.setAttribute('role', 'menuitemradio');
+      li.setAttribute('tabindex', '-1');
+      li.setAttribute('data-bw-speed', String(r));
+      li.innerHTML = '<span class="vjs-menu-item-text"></span>';
+      li.firstChild.textContent = rateText(r);
+      ul.appendChild(li);
+    });
+    el.addEventListener('click', function (e) {
+      var li = e.target.closest ? e.target.closest('.vjs-menu-item') : null;
+      if (li && el.contains(li)) {
+        api.set(parseFloat(li.getAttribute('data-bw-speed')));
+        el.classList.remove('bw-speed-open');
+      } else {
+        el.classList.toggle('bw-speed-open');
+      }
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    return el;
+  }
+
+  function setSpeed(host, r, remember) {
+    if (!(r > 0)) return;
+    host.__bwSpeed = r;
+    if (remember) window.__bwSpeedPref = r;   // 同一会话里后续打开的播放器跟着走
+    var player = playerOf(host);
+    var v = videoElOf(host);
+    try {
+      if (player && player.playbackRate) player.playbackRate(r);
+      else if (v) v.playbackRate = r;
+    } catch (e) {
+      if (v) v.playbackRate = r;
+    }
+    if (v && v.playbackRate !== r) { try { v.playbackRate = r; } catch (e) { /* ignore */ } }
+    paintSpeed(host.__bwSpeedEl, r);
+  }
+
+  function buildSpeed(host) {
+    var bar = ctlBarOf(host);
+    if (!bar) return false;
+    var el = bar.querySelector('.bw-speed');
+    if (el && el.isConnected) { host.__bwSpeedEl = el; return true; }
+    el = document.createElement('div');
+    el.className = 'bw-speed';
+    mountSpeed(el, { set: function (r) { setSpeed(host, r, true); } });
+    bar.insertBefore(el, bar.querySelector('.mwb-quality-button'));
+    host.__bwSpeedEl = el;
+    paintSpeed(el, speedOf(host));
+    // 点别处就收起。挂在宿主上而不是 document:这一族的播放器浮层本来就铺满整屏,
+    // 而绑在 document 上的话,节点被换掉后那个监听还会拽着旧元素不放。
+    host.addEventListener('pointerdown', function (e) {
+      if (!el.isConnected || !el.classList.contains('bw-speed-open')) return;
+      if (el.contains(e.target)) return;
+      el.classList.remove('bw-speed-open');
+    }, true);
+    return true;
+  }
+
+  /* 控制条与画质那颗都是异步建起来的,和 raiseQuality 同一套重试节奏 */
+  function ensureSpeed(host) {
+    if (host.__bwSpeedEl && host.__bwSpeedEl.isConnected) return;
+    if (buildSpeed(host)) { host.__bwSpeedTry = 0; return; }
+    host.__bwSpeedTry = host.__bwSpeedTry || 0;
+    if (++host.__bwSpeedTry < Q_TRIES * 2) setTimeout(function () { ensureSpeed(host); }, Q_EVERY);
+  }
+
+  /* ---- 看图器里真视频的控件条 ----
+     多视频 / 图文混合的微博,站点走的是看图器(.pswp)而不是它自己的播放器,那一层里只有裸
+     <video>:0 个 video-js、0 条控制条,点画面也不响应。浏览器自带的控件条又没法改样式
+     (在闭 shadow root 里),所以要统一成站点那条只能自己搭。
+     搭法是"借壳":容器标成 video-js + vjs-controls-enabled/vjs-has-started/vjs-user-active,
+     子节点用 vjs-play-control / vjs-mute-control / vjs-current-time / vjs-time-divider /
+     vjs-duration / vjs-progress-control(.vjs-progress-holder > .vjs-load-progress +
+     .vjs-play-progress) / vjs-fullscreen-control —— 36 高、上透明下 50% 黑的渐变、白字、
+     48 一格、VideoJS 图标字体,全是站点已经加载好的那份 CSS,我们只写定位与行为。
+     每颗按钮都要带 vjs-button:图标字号那条是 `.vjs-button > .vjs-icon-placeholder:before`,
+     漏了它那颗音量键会退回 1em(12px),比播放/全屏的 1.8em(21.6px)小一整号。
+     live 动图不在此列(它是 1~3s 的循环短片,加了反而像坏了的播放器),分辨同 media_save.js:
+     看 src 里有没有 `livephoto=`。 */
+  function isLiveSrc(v) {
+    var s = v.currentSrc || v.src || '';
+    if (!s && v.querySelector) {
+      var so = v.querySelector('source');
+      s = so ? (so.src || so.getAttribute('src') || '') : '';
+    }
+    return s.indexOf('livephoto=') >= 0;
+  }
+
+  function liveRoot() {
+    var p = null;
+    [].forEach.call(document.querySelectorAll('.pswp'), function (k) {
+      if (k.getBoundingClientRect().width > 0) p = p || k;
+    });
+    return p;
+  }
+
+  /* 当前这一页的真视频:矩形落在视口里、且不是 live 动图 */
+  function galVideo(p) {
+    var vs = p.querySelectorAll('video');
+    for (var i = 0; i < vs.length; i++) {
+      var r = vs[i].getBoundingClientRect();
+      if (r.width < 40 || r.right < 20 || r.left > innerWidth - 20) continue;
+      if (isLiveSrc(vs[i])) continue;
+      return vs[i];
+    }
+    return null;
+  }
+
+  function buildGalBar() {
+    var p = liveRoot();
+    if (!p) return;
+    var bar = null;
+    for (var i = 0; i < p.children.length; i++) {
+      if (p.children[i].classList.contains('bw-gbar')) bar = p.children[i];
+    }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'video-js bw-gbar vjs-controls-enabled vjs-has-started vjs-user-active vjs-paused';
+      bar.innerHTML =
+        '<div class="vjs-control-bar">' +
+          '<button type="button" class="vjs-play-control vjs-control vjs-button" tabindex="0">' +
+            '<span class="vjs-icon-placeholder"></span><span class="vjs-control-text">播放</span></button>' +
+          '<button type="button" class="vjs-mute-control vjs-control vjs-button vjs-vol-3" tabindex="0">' +
+            '<span class="vjs-icon-placeholder"></span><span class="vjs-control-text">静音</span></button>' +
+          '<div class="vjs-current-time vjs-time-control vjs-control">' +
+            '<span class="vjs-current-time-display">0:00</span></div>' +
+          '<div class="vjs-time-control vjs-time-divider"><div><span>/</span></div></div>' +
+          '<div class="vjs-duration vjs-time-control vjs-control">' +
+            '<span class="vjs-duration-display">0:00</span></div>' +
+          '<div class="vjs-progress-control vjs-control"><div class="vjs-progress-holder vjs-slider">' +
+            '<div class="vjs-load-progress"></div>' +
+            '<div class="vjs-play-progress"><div class="vjs-slider-handle"></div></div>' +
+          '</div></div>' +
+          '<div class="bw-speed"></div>' +
+          '<button type="button" class="vjs-fullscreen-control vjs-control vjs-button" tabindex="0">' +
+            '<span class="vjs-icon-placeholder"></span><span class="vjs-control-text">全屏</span></button>' +
+        '</div>';
+      p.appendChild(bar);
+      /* 站点给 :fullscreen 里的 .video-js 写了铺满整屏的规则(它自己的视频页要占满),
+         同为 !important 时它比特异性还高 —— 只有内联 !important 压得住。
+         不压的话全屏时这条会撑成一整屏高,把画面上的点击全接走。 */
+      bar.style.setProperty('height', '36px', 'important');
+      bar.style.setProperty('top', 'auto', 'important');
+      wireGalBar(p, bar);
+    }
+    syncGalBar(p, bar);
+  }
+
+  function wireGalBar(p, bar) {
+    var cur = null;
+    function v() { return cur; }
+    bar.__bind = function (vid) {
+      if (cur === vid) return;
+      cur = vid;
+      wake();
+      if (!vid || vid.__bwGalBound) return;
+      vid.__bwGalBound = true;
+      var once = function (fn) { return function () { if (cur === vid) fn(); }; };
+      vid.addEventListener('timeupdate', once(paint));
+      vid.addEventListener('durationchange', once(paint));
+      vid.addEventListener('progress', once(paint));
+      vid.addEventListener('ratechange', once(paint));
+      vid.addEventListener('play', once(state));
+      vid.addEventListener('pause', once(state));
+      vid.addEventListener('ended', once(state));
+      vid.addEventListener('volumechange', once(state));
+    };
+    function state() {
+      var x = v();
+      if (!x) return;
+      bar.classList.toggle('vjs-playing', !x.paused);
+      bar.classList.toggle('vjs-paused', !!x.paused);
+      bar.classList.toggle('vjs-ended', !!x.ended);
+      // 站点那条暂停时是常驻的(它的规则要 vjs-playing)—— 停下来就把条子叫回来
+      if (x.paused) wake();
+      /* 播放/暂停的字形看的是**按钮上**的 vjs-playing(video.js 的选择器是
+         `.video-js .vjs-play-control.vjs-playing .vjs-icon-placeholder:before`),
+         只挂容器会永远停在"▶"。 */
+      var pb = bar.querySelector('.vjs-play-control');
+      if (pb) pb.classList.toggle('vjs-playing', !x.paused);
+      var m = bar.querySelector('.vjs-mute-control');
+      if (m) {
+        m.classList.toggle('vjs-vol-0', !!x.muted || x.volume === 0);
+        m.classList.toggle('vjs-vol-3', !(x.muted || x.volume === 0));
+      }
+      paint();
+    }
+    function paint() {
+      var x = v();
+      if (!x) return;
+      var dur = isFinite(x.duration) ? x.duration : 0;
+      bar.querySelector('.vjs-current-time-display').textContent = fmt(x.currentTime || 0);
+      bar.querySelector('.vjs-duration-display').textContent = fmt(dur);
+      var pl = bar.querySelector('.vjs-play-progress');
+      var ld = bar.querySelector('.vjs-load-progress');
+      pl.style.width = (dur > 0 ? Math.min(100, (x.currentTime || 0) / dur * 100) : 0) + '%';
+      try {
+        if (ld && x.buffered.length && dur > 0) {
+          ld.style.width = Math.min(100, x.buffered.end(x.buffered.length - 1) / dur * 100) + '%';
+        }
+      } catch (e) { /* ignore */ }
+      paintSpeed(bar.__speedEl, x.playbackRate || 1);
+      /* 条子摆在**整层看图器的底边**(用户要的"页面底部"),不跟着画面下沿跑 ——
+         画面在竖屏里通常是居中一条,贴着它放就等于悬在屏幕中间。
+         左右仍按画面的矩形收,横屏全屏时条子只占画面那一段。
+         这三行必须是 important 的内联样式:站点给 :fullscreen 里的 .video-js 写了
+         `width/height:100% !important`(它自己的视频页要铺满整屏),借壳的容器也吃这条,
+         普通内联压不住 —— 实测全屏后条子被拉成整屏宽,最右那颗全屏键甩出屏外 66px。 */
+      var pr = p.getBoundingClientRect(), vr = x.getBoundingClientRect();
+      bar.style.setProperty('left', Math.round(Math.max(0, vr.left - pr.left)) + 'px', 'important');
+      bar.style.setProperty('width', Math.round(Math.min(pr.width, vr.width)) + 'px', 'important');
+      bar.style.setProperty('bottom', Math.round(Math.min(0, pr.bottom - vr.bottom)) + 'px', 'important');
+    }
+    bar.querySelector('.vjs-play-control').addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var x = v(); if (!x) return;
+      if (x.ended) { try { x.currentTime = 0; } catch (err) { /* ignore */ } }
+      if (x.paused) { try { x.play(); } catch (err) { /* ignore */ } } else { x.pause(); }
+    });
+    bar.querySelector('.vjs-mute-control').addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var x = v(); if (!x) return;
+      x.muted = !x.muted;
+      state();
+    });
+    bar.querySelector('.vjs-fullscreen-control').addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var fs = document.fullscreenElement || document.webkitFullscreenElement;
+      if (fs) {
+        try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (err) { /* ignore */ }
+        return;
+      }
+      /* 全屏请求发给整层看图器而不是 <video>:HTML5 全屏只渲染 :fullscreen 那棵子树,
+         只让 video 进全屏的话这条控件条就不在子树里,又变成"全屏后没控件"。 */
+      var rq = p.requestFullscreen || p.webkitRequestFullscreen || p.webkitRequestFullScreen;
+      try { if (rq) rq.call(p); } catch (err) { /* ignore */ }
+    });
+    bar.__speedEl = mountSpeed(bar.querySelector('.bw-speed'), {
+      set: function (r) {
+        var x = v(); if (!x || !(r > 0)) return;
+        x.playbackRate = r;
+        window.__bwSpeedPref = r;
+        paint();
+      }
+    });
+    /* 拖进度:按下/拖动都按 holder 的矩形换算成时间,期间不碰站点的翻页 */
+    var hold = bar.querySelector('.vjs-progress-holder');
+    var seekTo = function (clientX) {
+      var x = v(); if (!x || !isFinite(x.duration)) return;
+      var r = hold.getBoundingClientRect();
+      var f = (clientX - r.left) / Math.max(1, r.width);
+      x.currentTime = Math.max(0, Math.min(x.duration - 0.05, f * x.duration));
+      paint();
+    };
+    var dragging = false;
+    bar.querySelector('.vjs-progress-control').addEventListener('pointerdown', function (e) {
+      dragging = true; seekTo(e.clientX);
+      e.preventDefault(); e.stopPropagation();
+    });
+    bar.querySelector('.vjs-progress-control').addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      seekTo(e.clientX);
+      e.preventDefault(); e.stopPropagation();
+    });
+    var endDrag = function (e) {
+      if (!dragging) return;
+      dragging = false;
+      if (e) e.stopPropagation();
+    };
+    bar.querySelector('.vjs-progress-control').addEventListener('pointerup', endDrag);
+    bar.querySelector('.vjs-progress-control').addEventListener('pointercancel', endDrag);
+    window.addEventListener('pointerup', endDrag, true);
+    /* 收起倍速菜单:按下落在条子外面就收 */
+    p.addEventListener('pointerdown', function (e) {
+      var el = bar.__speedEl;
+      if (!el || !el.classList.contains('bw-speed-open')) return;
+      if (el.contains(e.target)) return;
+      el.classList.remove('bw-speed-open');
+    }, true);
+    /* ---- 闲置自动收 + 点画面翻显隐 ----
+       站点那条靠 video.js 的 user-active 态:实测约 2s 没有活动就把 vjs-user-inactive 挂上,
+       控制条 opacity 归 0、pointer-events 变 none(所以收起来之后不吃点击)。这里翻同一对类,
+       淡入淡出与"藏起来不挡手"都由站点已加载的那份 CSS 出。
+       "点画面"这一手势在看图器里本来是空的(裸 <video> 点着不应),就派给显隐;
+       判定用按下-抬起的位移与时序:横滑翻页、拖进度、长按倍速都不满足(>12px 或 >350ms)。 */
+    var hideAt = 0;
+    function wake() {
+      bar.classList.remove('vjs-user-inactive');
+      bar.classList.add('vjs-user-active');
+      hideAt = Date.now() + 2000;
+    }
+    function sleep() {
+      bar.classList.remove('vjs-user-active');
+      bar.classList.add('vjs-user-inactive');
+    }
+    bar.__idle = function () {
+      if (!hideAt || Date.now() < hideAt) return;
+      var el = bar.__speedEl;
+      // 菜单开着不收,顺手把时限往后推一格
+      if (el && el.classList.contains('bw-speed-open')) { hideAt = Date.now() + 2000; return; }
+      sleep();
+    };
+    bar.__wake = wake;
+    bar.addEventListener('pointerdown', wake, true);
+    bar.addEventListener('pointermove', wake, true);
+    var tx = 0, ty = 0, tt = 0;
+    p.addEventListener('pointerdown', function (e) {
+      if (bar.contains(e.target)) { tt = 0; return; }
+      tx = e.clientX; ty = e.clientY; tt = Date.now();
+    }, true);
+    p.addEventListener('pointerup', function (e) {
+      if (!tt) return;
+      var moved = Math.abs(e.clientX - tx) + Math.abs(e.clientY - ty);
+      var dur = Date.now() - tt;
+      tt = 0;
+      if (bar.contains(e.target) || moved > 12 || dur > 350) return;
+      var x = v();
+      // 暂停时站点那条是常驻的(它的规则要 vjs-playing),这时点画面只把它叫醒
+      if (bar.classList.contains('vjs-user-inactive') || !x || x.paused) wake();
+      else sleep();
+    }, true);
+    p.addEventListener('pointercancel', function () { tt = 0; }, true);
+    document.addEventListener('fullscreenchange', function () {
+      var fs = document.fullscreenElement || document.webkitFullscreenElement;
+      bar.classList.toggle('vjs-fullscreen', !!fs);
+      syncGalBar(p, bar);
+    });
+    bar.__state = state;
+  }
+
+  function syncGalBar(p, bar) {
+    var v = galVideo(p);
+    if (!v) {
+      bar.classList.add('bw-gbar-off');
+      return;
+    }
+    bar.classList.remove('bw-gbar-off');
+    bar.__bind(v);
+    if (bar.__state) bar.__state();
+    if (bar.__idle) bar.__idle();
+  }
+
+  /* 站点的画质菜单只在自己那颗按钮上翻 `.mwb-show-menu`(实测挂上 display:block、摘掉 display:none),
+     点画面、点进度条、点别处都不收 —— 菜单就一直杵在屏幕上,要再点一次画质才翻得回去。
+     这里补"点空白处收起":按下落在按钮之外就把类摘掉。落在菜单项上不算"外面"
+     (菜单是按钮的子节点),所以选档位照旧走站点自己的处理。
+     挂在 document 而不是播放器宿主上:这条与"哪个播放器"无关,且整份脚本有 __bwSeekReady 守卫,
+     一次页面加载只注册一个监听。 */
+  document.addEventListener('pointerdown', function (e) {
+    var open = document.querySelectorAll('.mwb-quality-button.mwb-show-menu');
+    for (var i = 0; i < open.length; i++) {
+      if (open[i].contains(e.target)) continue;
+      open[i].classList.remove('mwb-show-menu');
+    }
+  }, true);
 
   function bind(host) {
     if (host.__bwSeekBound) return;
@@ -215,8 +670,26 @@
     host.addEventListener('pointerdown', pushAspect, true);
     host.addEventListener('loadedmetadata', pushAspect, true);
     /* play 不冒泡,但捕获阶段照样经过宿主。站点自己也会在换档后重新触发 play,
-       所以 raiseQuality 用 __bwQDone 挡住第二次,不会来回切。 */
+       raiseQuality 按"这条片子的源地址"去重,换档后那一次只会读到"已在最高档"。 */
     host.addEventListener('play', function () { raiseQuality(host); }, true);
+    /* 按下落在画质那颗上 = 菜单将开,趁这一拍把"当前档"标回去(捕获阶段,站点的开菜单在后头) */
+    host.addEventListener('pointerdown', function (e) {
+      var t = e.target;
+      if (t && t.closest && t.closest('.mwb-quality-button')) markQuality(host);
+    }, true);
+
+    /* 倍速那颗:控制条建好才有地方插,交给 ensureSpeed 自己重试。
+       换画质会走一遍 src()+load(),新元数据到达时速率会被打回 1x —— 所以在
+       loadedmetadata 上把这一层记住的值再按一次(只在"确实不等于记住值"时动手,
+       免得和站点自己的 ratechange 来回咬)。 */
+    ensureSpeed(host);
+    host.addEventListener('loadedmetadata', function () {
+      ensureSpeed(host);
+      var want = speedOf(host);
+      var v = videoElOf(host);
+      if (want !== 1 && v && v.playbackRate !== want) setSpeed(host, want, false);
+      paintSpeed(host, speedOf(host));
+    }, true);
 
     var startX = 0, startY = 0, startTime = 0, scrubbing = false, video = null;
 
@@ -266,12 +739,35 @@
 
     // 横向手势不让页面跟着滚,纵向仍正常滚动
     host.style.touchAction = 'pan-y';
+    /* "点开播放"那一层是铺满整屏的浮层(实测 .mwb-layer 与它里面的 .mwb-video 都是
+       0,0,411,840):在它上面竖滑,后面那叠微博会跟着滚 —— 用户报的"视频播放界面上下滑动,
+       背后的微博也会上下滑动"。
+       锁法试过三种(同一台 WebView、同一条 adb 竖滑、每次都验过手指落点确实在浮层上):
+         ① 浮层 touch-action:none → 照滚 Δ=330,这条路在本 WebView 不成立;
+         ② html,body{overflow:hidden} → Δ=0 但 scrollY 当场从 1588 跳到 0,
+            背后读到一半的位置被甩掉,不能用;
+         ③ 浮层上挂非 passive 的 touchmove + preventDefault → Δ=0 且不动 scrollY。
+       取 ③。菜单那一层例外:条目多到出框时它自己要能滚,那种目标放行。 */
+    var layer = host.closest ? host.closest('.mwb-layer') : null;
+    if (layer && !layer.__bwScrollLock) {
+      layer.__bwScrollLock = true;
+      layer.addEventListener('touchmove', function (e) {
+        var t = e.target;
+        var box = t && t.closest ? t.closest('.vjs-menu-content') : null;
+        if (box && box.scrollHeight > box.clientHeight + 1) return;
+        e.preventDefault();
+      }, {passive: false});
+    }
   }
 
   function scan() {
     var hosts = document.querySelectorAll('.video-js, .mwb-video, .video-container');
     for (var i = 0; i < hosts.length; i++) {
-      if (seekable(hosts[i])) bind(hosts[i]);
+      if (seekable(hosts[i])) {
+        bind(hosts[i]);
+        // 站点重建控制条(换源、重开浮层)后那颗会掉,bind 是幂等的、这里补一次
+        if (hosts[i].__bwSeekBound) ensureSpeed(hosts[i]);
+      }
     }
     var vids = document.querySelectorAll('video');
     for (var j = 0; j < vids.length; j++) {
@@ -279,6 +775,20 @@
       if (!vids[j].closest || !vids[j].closest('.video-js,.mwb-video,.video-container')) {
         if (seekable(vids[j])) bind(vids[j]);
       }
+    }
+    /* 多视频 / 图文混合的微博,点开走的是站点看图器(.pswp)而不是那条 .mwb-layer 播放器:
+       实测里面是裸 <video>、0 个 video-js、0 条控制条,点画面也不响应 —— 用户报的
+       "这种微博的播放页下面没有进度条那一排"就是它。控件条由 buildGalBar 自己搭
+       (借 video.js 的类名吃站点的样式),所以这里一律关掉浏览器原生控件:
+       原生那条在闭 shadow root 里改不了样式,留着就是两种样子叠在一起。
+       live 动图不搭也不加(它是 1~3s 的循环短片) —— 分辨看 isLiveSrc。 */
+    var groot = liveRoot();
+    if (groot) {
+      var gal = groot.querySelectorAll('video');
+      for (var g = 0; g < gal.length; g++) { if (gal[g].controls) gal[g].controls = false; }
+      buildGalBar();
+      /* 翻页是 transform,不一定触发变异观察器 → 看图器开着时自己续一拍 */
+      setTimeout(schedule, 600);
     }
   }
 

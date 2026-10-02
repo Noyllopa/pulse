@@ -50,7 +50,8 @@
     cmt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20l1-4.1A7.5 7.5 0 1 1 20 12.5Z"/></svg>',
     rt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.5 20.5 6 17 9.5"/><path d="M20.5 6H8a4 4 0 0 0-4 4v1"/><path d="M7 21.5 3.5 18 7 14.5"/><path d="M3.5 18H16a4 4 0 0 0 4-4v-1"/></svg>',
     like: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 21V9.5l4.2-7A2 2 0 0 1 14.8 5l-.9 4.5H20a2 2 0 0 1 2 2.4l-1.5 7A2 2 0 0 1 18.5 21H7Z"/><path d="M7 10H3v11h4"/></svg>',
-    back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>'
+    back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
+    refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.8 4.4v5.4h-5.4"/></svg>'
   };
   var ITEMS = [
     {k: 'home', label: '首页', icon: ICONS.home},
@@ -59,20 +60,36 @@
     {k: 'me', label: '我的', icon: ICONS.me}
   ];
 
+  /* 刷新提示的"接力棒":首页图标缩小消失 → 环形进度条转满 → 环淡出 → 图标放大回来。
+     环要严丝合缝压在图标上,所以给图标套一个 22x22 的相对定位壳(这两个节点都是
+     我们自己造的,不动站点 DOM)。 */
+  var RING = '<svg class="bw-ring" viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+    '<circle class="trk" cx="12" cy="12" r="8.5"></circle>' +
+    '<circle class="arc" cx="12" cy="12" r="8.5"></circle></svg>';
+
   function build() {
     if (document.getElementById('bw-nav')) return;
     var nav = document.createElement('div');
     nav.id = 'bw-nav';
     var html = '';
     for (var i = 0; i < ITEMS.length; i++) {
+      var ic = ITEMS[i].k === 'home'
+        ? '<span class="bw-icowrap">' + ITEMS[i].icon + RING + '</span>'
+        : ITEMS[i].icon;
       html += '<div class="bw-nav-item" data-k="' + ITEMS[i].k + '">' +
-        ITEMS[i].icon + '<span>' + ITEMS[i].label + '</span></div>';
+        ic + '<span>' + ITEMS[i].label + '</span></div>';
     }
     nav.innerHTML = html;
     document.documentElement.appendChild(nav);
     nav.addEventListener('click', function (e) {
       var item = e.target && e.target.closest ? e.target.closest('.bw-nav-item') : null;
       if (item) act(item.getAttribute('data-k'));
+    });
+    /* 收尾把类摘掉:留着状态不干净,而重启动画靠的是"摘了再加"。
+       两条动画(图标 + 环)时长同值、同一帧结束,任一一条报结束都可以摘。 */
+    nav.addEventListener('animationend', function (e) {
+      var item = e.target && e.target.closest ? e.target.closest('.bw-nav-item') : null;
+      if (item) item.classList.remove('bw-refreshing');
     });
 
     // 发微博悬浮球:复用页内"写微博"按钮
@@ -88,6 +105,23 @@
       } else if (window.BwNative && window.BwNative.toast) {
         window.BwNative.toast('请先回到首页');
       }
+    });
+
+    /* 刷新球:站点自己在信息流上浮的那颗 .refresh-btn 被 theme.js 收掉了(手机右下角
+       与发博球重叠才收的),这里把它还原成一颗看得见的圆球,只放在发博球正上方、
+       与它同尺寸(样式全吃 --bw-fab-* 令牌,见 theme.js 的 #bw-fres)。
+       行为一律代理给站点那颗控件,不复制:实测点它 = 回顶 + 按站点自己的窗口化口径
+       重建首页流(padTop/padBottom 归零、卡片补回),自己 scrollTo(0) 反而会把
+       窗口化列表甩在身后(见 dev-notes"回顶与下拉刷新")。
+       只在平板出现(theme.js 里手机档 base 是 display:none)。 */
+    var fres = document.createElement('div');
+    fres.id = 'bw-fres';
+    fres.innerHTML = ICONS.refresh;
+    document.documentElement.appendChild(fres);
+    fres.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var btn = document.querySelector('.refresh-btn');
+      if (btn) btn.click();
     });
   }
 
@@ -233,7 +267,7 @@
 
   /* .pswp 那颗节点是常驻的(收起只是 display:none),所以盯它自己:
      class/style 一变就同步一次状态,不等 refresh 的 250ms 防抖。 */
-  var pswpObs = null, galleryWasOpen = null;
+  var pswpObs = null, galleryWasOpen = null, obsLayer = null;
   function syncGalleryOverlay() {
     var open = pswpOpen();
     /* 只在真的换态时过一趟 JS→Java 桥:原来每次调用都无条件报一遍,
@@ -259,13 +293,25 @@
     }
     if (!pswpObs) {
       try {
-        pswpObs = new MutationObserver(function () { syncGalleryOverlay(); });
+        /* 这一趟除了报状态给原生，还要把悬浮件按当前浮层态摆回去(overlayEdge)：
+           浮层的开合一刀就写在这两个属性上，盯住它们才不依赖 refresh 什么时候再来。 */
+        pswpObs = new MutationObserver(function () {
+          syncGalleryOverlay();
+          overlayEdge(overlayOpen());
+        });
         /* 只看 .pswp 自己的 class/style —— 开关态就写在这两个属性上。
            原来带 subtree:true,而 PhotoSwipe 拖动时**每帧**都在写后代的 transform,
            实测一次拖动手势里观察器进 60 次、每次一趟强制重排;漏掉的态还有
            refresh()(滚动 + 250ms 调度)兜着。 */
         pswpObs.observe(p, {attributes: true, attributeFilter: ['class', 'style']});
       } catch (e) { pswpObs = null; }
+    }
+    /* 全屏视频层同样只把开关态写在 class/style 上，一起盯；它是常驻节点，
+       第一次进来才挂上(挂过就不重复 observe 同一个元素) */
+    var ly = document.querySelector('.mwb-layer');
+    if (pswpObs && ly && ly !== obsLayer) {
+      obsLayer = ly;
+      try { pswpObs.observe(ly, {attributes: true, attributeFilter: ['class', 'style']}); } catch (e) { /* ignore */ }
     }
     /* 左上角返回胶囊:站点自己的关闭键在右上,这条补的是"左上角也能退"。
        只在撰写页放 —— 信息流看图没这个要求,不去改它既有的样子。 */
@@ -369,6 +415,18 @@
 
   var lastHomeTap = 0;
 
+  /* 刷新反馈:让首页那颗图标与环接力(动画本体在 theme.js 的 .bw-refreshing 那组)。
+     只在这一支调用 —— 回顶那一支有滚动当反馈,不该再动。
+     重触发必须"摘类 → 强制回流 → 加类":只加类名时浏览器认为动画已经在跑,
+     连着两次刷新就只有第一次会动。void offsetWidth 是同步把那次摘类落地。 */
+  function cueRefresh() {
+    var it = document.querySelector('.bw-nav-item[data-k="home"]');
+    if (!it) return;
+    it.classList.remove('bw-refreshing');
+    void it.offsetWidth;
+    it.classList.add('bw-refreshing');
+  }
+
   function act(k) {
     if (k === 'home') {
       var p = location.pathname;
@@ -391,7 +449,10 @@
         var now = Date.now();
         if (now - lastHomeTap < 500) {
           lastHomeTap = 0;
-          if (btn) btn.click();      /* 已在顶部:第二下 = 站点语义的"刷新信息流" */
+          if (btn) {                 /* 已在顶部:第二下 = 站点语义的"刷新信息流" */
+            cueRefresh();
+            btn.click();
+          }
         } else {
           lastHomeTap = now;
           window.scrollTo({top: 0, behavior: 'smooth'});
@@ -485,6 +546,12 @@
   function videoLayerOpen() {
     var el = document.querySelector('.video-player.mwb-layer, .mwb-layer');
     if (!el) return false;
+    /* 和 pswpOpen/sheetOpen 一样先看可见性再量尺寸:这一层收起来时站点通常把尺寸塌成 0x0，
+       但不是每条路径都塌(实测它的内联 display:none 要等自身收合动画结束才写)。
+       只量尺寸的话，一层"显示不出来但仍占满屏"的壳就能把悬浮件永久按住。 */
+    if (el.style.display === 'none') return false;
+    var cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
     var r = el.getBoundingClientRect();
     return r.width >= window.innerWidth * .6 && r.height >= window.innerHeight * .6;
   }
@@ -519,6 +586,54 @@
 
   function overlayOpen() { return videoLayerOpen() || pswpOpen() || sheetOpen(); }
 
+  /* 悬浮导航与发博按钮的显隐：只看"是不是主 tab"+"有没有浮层压在上面"。
+     从 refresh() 里摘出来单独成函数，是因为浮层的开合一刀不能等 refresh —— 见 overlayEdge。 */
+  var lastHidden = false;
+
+  function syncOverlayChrome(ov) {
+    var immersive = !isMainTab() || ov;
+    var navEl = document.getElementById('bw-nav');
+    if (navEl) {
+      navEl.style.display = immersive ? 'none' : 'flex';
+      navEl.classList.toggle('bw-scroll-hide', lastHidden);
+    }
+    var root = document.documentElement;
+    var fabEl = document.getElementById('bw-fab');
+    var disc = searchDiscuss();
+    /* 有那条讨论栏时:球顶替它(主题样式在 theme.js 按这个类切换) */
+    root.classList.toggle('bw-fab-disc', !!disc);
+    if (fabEl) {
+      fabEl.classList.toggle('bw-hide',
+        disc ? ov : (immersive || !document.querySelector('.lite-iconf-releas')));
+      fabEl.classList.toggle('bw-scroll-hide', lastHidden);
+    }
+    /* 刷新球只在"站点自己那颗 .refresh-btn 在页里"时放出 —— 它是那颗控件的替身,
+       没有替身对象就没有落点。讨论条那页(球顶替讨论条)也不算信息流页,一并收掉。
+       与发博球同一处判定,免得两条路各判各的、错开 250ms。 */
+    var fresEl = document.getElementById('bw-fres');
+    if (fresEl) {
+      fresEl.classList.toggle('bw-hide',
+        !!disc || immersive || !document.querySelector('.refresh-btn'));
+    }
+  }
+
+  /* 浮层换态的那一刻要自己把悬浮件摆回去，不能等下一趟 refresh：
+     refresh 只由滚动、路由变化和 childList 变异驱动，而站点收起看图器写的是
+     .pswp 自己的 class/style —— 属性变异进不了那条观察器。实测平板首页关掉大图：
+     判定在 494ms 就翻成"没开"，导航栏到 746ms 才回来，中间那 252ms 全靠
+     信息流顺带重排产生的 childList 补了一脚。那一脚没来（收合时页面正好没有
+     增删节点），导航栏和发博球就一直躺着 —— 用户看到的就是"关掉图片后左侧
+     导航和右下角发博球没了"。 */
+  var ovWasOpen = null;
+
+  function overlayEdge(ov) {
+    if (ov === ovWasOpen) return;
+    ovWasOpen = ov;
+    syncOverlayChrome(ov);
+    /* 收起这一头沿用看图器收合动画的时长再补一次：动画期间尺寸还是满屏 */
+    if (!ov) setTimeout(function () { syncOverlayChrome(overlayOpen()); }, 420);
+  }
+
   /* 站点的"打开APP查看更多精彩内容"引导:WOUI 的 .woo-modal(z9999 满屏)
      带一层 .woo-modal__mask(z999),超话页进去就是它盖住整屏,不点"取消"什么都动不了。
      只按类名一刀切会连带杀掉别的确认框,所以按文案识别:
@@ -526,19 +641,33 @@
      真确认框的文案不会带这些字。文案超过 120 字的也不动(那是页面本体)。 */
   var NAG_RE = /(打开|前往|进入|使用)\s*(微博)?\s*(APP|App|app)|查看更多精彩内容|(APP|App)\s*内(打开|查看)|下载\s*(微博)?\s*(APP|App|app)|微博内打开/;
 
+  /* 限流:这一趟要遍历全文档(实测滚动中的首页 820 个 div + 上千个 a/span/button),
+     逐个 getComputedStyle 并取 rect —— CPU profiler 实测占滚动期主线程 **9.4%**,
+     是排布之外的第一热点。而它要收的是"打开 APP"引导弹层,那是换页/换路由才出现的
+     东西,与滚动无关;refresh 又挂在每个滚动事件上,等于一直在做无用功。
+     250ms 一次足够(弹层多活 0.25s 看不出来)。 */
+  var nagAt = 0;
   function killAppNags() {
     if (!document.body) return;
+    var now = Date.now();
+    if (now - nagAt < 250) return;
+    nagAt = now;
     var all = document.body.getElementsByTagName('div');
     for (var i = 0; i < all.length; i++) {
-      var e = all[i], cs = window.getComputedStyle(e);
-      if (cs.display === 'none' || cs.visibility === 'hidden' || e.style.display === 'none') continue;
+      var e = all[i];
+      /* 判据顺序要"从便宜到贵":原来第一句就是 getComputedStyle,而它正是这条
+         循环的全部成本(整页 800+ 个 div 每个都算一次)。文案与长度两条都不碰样式,
+         先把绝大多数 div 排掉,再对少数候选算样式/取 rect。 */
+      if (e.style.display === 'none') continue;
+      var t = (e.textContent || '').replace(/\s+/g, ' ');
+      if (t.length > 120 || !NAG_RE.test(t)) continue;
+      var cs = window.getComputedStyle(e);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
       if (cs.position !== 'fixed' && cs.position !== 'absolute') continue;
       var z = parseInt(cs.zIndex, 10) || 0;
       if (z < 500) continue;
       var r = e.getBoundingClientRect();
       if (r.width < window.innerWidth * .5 || r.height < window.innerHeight * .25) continue;
-      var t = (e.textContent || '').replace(/\s+/g, ' ');
-      if (t.length > 120 || !NAG_RE.test(t)) continue;
       e.style.setProperty('display', 'none', 'important');
       /* 遮罩常是它的兄弟节点;顺手把同层带 mask/overlay/layer 字样的满屏兄弟一起收掉 */
       var p = e.parentElement;
@@ -560,10 +689,16 @@
       '前往app': 1, '下载app': 1, 'app内打开': 1, '打开微博': 1, '查看更多精彩内容': 1 };
     var nodes = document.querySelectorAll('div, a, span, button');
     for (var k = 0; k < nodes.length; k++) {
-      var e2 = nodes[k], cs2 = window.getComputedStyle(e2);
-      if (cs2.display === 'none' || e2.style.display === 'none') continue;
+      var e2 = nodes[k];
+      /* 同上:文案判据放到样式之前。NAG_TEXT 是**整串精确匹配**,长度天然受限,
+         不必另设长度上限 —— 设了反而会误伤模板里带缩进/换行的节点(去空白前的
+         长度会超)。取值用 `=== 1` 而不是直接取真值:对象字面量继承 Object.prototype,
+         节点文案恰好是 "constructor" 之类时会误命中。 */
       var t2 = (e2.textContent || '').replace(/\s+/g, '').trim().toLowerCase();
-      if (!NAG_TEXT[t2]) continue;
+      if (NAG_TEXT[t2] !== 1) continue;
+      if (e2.style.display === 'none') continue;
+      var cs2 = window.getComputedStyle(e2);
+      if (cs2.display === 'none') continue;
       var r2 = e2.getBoundingClientRect();
       if (r2.width < 30 || r2.height < 16) continue;
       var up = e2, fixed = false;
@@ -742,7 +877,7 @@
         var trig = document.querySelector(TRIG_SEL);
         if (trig && (t === trig || trig.contains(t))) { dropAnchor(); return; }  /* 触发器自己管开合 */
         if (pop === t || pop.contains(t)) return;                                /* 选中分组由站点自己关闭 */
-        if (t.closest && t.closest('#bw-nav, #bw-fab, #bw-fback, #bw-fset, #bw-acts')) return;
+        if (t.closest && t.closest('#bw-nav, #bw-fab, #bw-fres, #bw-fback, #bw-fset, #bw-acts')) return;
         closeDrop();
       }, true);
     }
@@ -768,21 +903,19 @@
     syncEditorClass();
   }
 
-  /* 搜索壳该不该收起。判据只用"滚过多少" + 自己记的那条位置,不读站点那条 fixed:
-     站点在分类条吸顶那一刻给 .module-page-fragment 加 fixed,而它改这个类的时机排在
-     我们自己的 scroll 回调**后面** —— 于是快速上滑停手时,最后一次求值看到的还是
-     fixed=true,收起态就被留在 on 了(2026-09-30 用户报的"上滑过快,搜索框和返回按钮
-     无法恢复";实测停在 y=0、fixed 已摘、分类条回到 top:167,而 bw-bar-collapse 仍 true,
-     之后再没有 scroll 事件来纠正 —— 变异观察器只看 childList,类改动唤不醒它)。
-     改法:分类条**在常规流里**的那些时刻记下它自己的文档坐标顶边(实测这条页 167),
-     判据 = 那条顶边减去 scrollY 有没有落到搜索壳底边之下(留 HEAD_LEAD 提前量)。
-     两个量的坐标系要一致,都是**视口**:壳的底边取 offsetTop - scrollY + offsetHeight,
-     不取 getBoundingClientRect().bottom —— 收起态给自己那条壳加了 translateY(-16px),
-     rect 会把这 16 算进去,阈值就跟着当前收起状态漂(实测原来那条判据收起在 y=76、
-     放回在 y=88,中间 12px 就是这 16px 造成的迟滞)。sticky 元素的 offsetTop 会跟着
-     吸顶位移一起涨(实测 y=120 时报 134),所以必须减掉 scrollY 才是它在视口里的底边。
-     没有分类条(或没有搜索壳)的页面一律不收:那等于把改关键词的入口弄丢。 */
-  var HEAD_LEAD = 24;
+  /* 搜索壳(返回钮 + 搜索框)该不该收起。判据一句话:分类条离屏顶还有几像素。
+     站点正是"到顶"那一刻给 .module-page-fragment 挂 fixed,两者同一帧换 ——
+     壳收下去、条子接上,中间不留空档。
+     实现上顶边只能自己记账(在常规流里读一次 rect,钉住时 rect 恒为 0 读不到真值),
+     然后 记到的文档顶边 - scrollY 与 6 比。前两版各栽在一半:
+       - 直接读站点的 fixed 类:那个类由站点写、摘得比我们这次求值晚,快速上滑停手时
+         最后一帧看到的还是 fixed=true,收起态就被留在 on(2026-09-30"上滑过快,搜索框回不来");
+       - 账是对的,但拿它去跟"壳的底边"比:壳是 sticky 的,`offsetTop - scrollY + offsetHeight`
+         得到的是它在**文档里**的底边(实测 58),而 `文档顶边 - scrollY` 是**视口**坐标,
+         两个坐标系混着比再加 10+24 的提前量,阈值抬到 92 —— 这条页分类条本来只从文档 68
+         起头,于是 y=0 就判成"到顶",一进去壳就是收着的、上滑也回不来(2026-10-02 用户报的这条)。
+     没有分类条(或没有搜索壳)的页面一律不收 —— 那等于把改关键词的入口弄丢。 */
+  var FRAG_TOP_LEAD = 6;
   var fragDocTop = null;
   function searchHeadAtTop() {
     var shell = document.querySelector('.ntop-nav');
@@ -791,11 +924,13 @@
     var frag = (bar.closest && bar.closest('.module-page-fragment')) || bar;
     var r = frag.getBoundingClientRect();
     var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+    /* 记账只在常规流里做:条子被钉住时 rect 恒为 0,读不到它真实的位置。
+       站点摘 fixed 的时机排在我们这次求值之后 —— 那一帧类还在、rect 也还是 0,
+       跳过记账正好躲开它,判据用的是上一次记到的文档坐标。 */
     if (r.height && !frag.classList.contains('fixed')) fragDocTop = r.top + y;
-    // 还没机会在流里见过这条(页面一打开就停在深处):退回按站点的 fixed 判一次
     if (fragDocTop === null) return frag.classList.contains('fixed');
-    var shellBottom = shell.offsetTop - y + shell.offsetHeight;
-    return fragDocTop - y <= shellBottom + 10 + HEAD_LEAD;
+    // 两个量都在视口里比:差几像素就到顶,与站点挂 fixed 那一刻对齐
+    return fragDocTop - y <= FRAG_TOP_LEAD;
   }
 
   function syncFloatChrome(deep, hidden) {
@@ -829,6 +964,12 @@
     fb.classList.toggle('bw-scroll-hide', chrome);
     set.classList.toggle('bw-scroll-hide', chrome);
     if (editor) editor.classList.toggle('bw-scroll-hide', chrome);
+    /* 卡片页(博主主页那一族)底部那条站点自己的操作栏(已关注/私信/热门)跟着同一把锁
+       —— 它是这一页唯一的底部控件,读内容时和上面三件一起让开,反向一滚立刻放回。
+       只给这一族:搜索页那条讨论栏也是 .m-tab-bar.m-bar-panel,不在本次需求里。
+       平板档不打(那条要么整条不出现、要么居中在条带里,位移语义不一样)。 */
+    var tbar = document.querySelector('.m-tab-bar.m-bar-panel');
+    if (tbar) tbar.classList.toggle('bw-scroll-hide', chrome && !wide && hcls.contains('bw-cardpage'));
     /* 搜索/热搜条目页:收起左上返回钮与搜索框,让分类条自己顶到屏顶。
        时机不再跟悬浮件那套锁存 —— 固定 200px 与"分类条到没到顶"根本不对齐
        (实测这条页分类条在 scrollY≈99 就吸住了,原来要等到 200 才收,
@@ -942,6 +1083,89 @@
     return t;
   }
 
+  /* ---- 路由回来时列表整棵重建:先把图的位置按原高钉住,别让内容上下跳 ----
+     实测(搜索页 → 点一条正文 → 返回):返回后 87/87 个 <img> 都是新节点,当帧 53/93 张
+     没就绪;没回来的那张把盒子从 115.4 塌成 17,一页里几张这样的卡先后长回来,
+     scrollY 一直停在 420 不动、内容却上下挪(实测文档高 6508→7091→6710→6941 来回)。
+     站点自己的九宫格有 .m-imghold-* 占位,塌的只是 OG 单图这类"高度由图撑"的盒。
+     办法:按 src 记住加载完成后的显示高,新节点没解码回来之前先写死这个高,
+     load 回来立刻摘掉(摘掉的那一帧高度与钉住值同一档,看不出动)。
+     钉按 src+显示宽配,避免同一张图在别处是小缩略图时被钉错。 */
+  var IMG_H = Object.create(null);
+  var IMG_N = 0;
+  function imgKey(im) {
+    var src = im.currentSrc || im.src;
+    if (!src || src.indexOf('data:') === 0) return null;
+    return src;
+  }
+  function noteImg(im, src) {
+    var r = im.getBoundingClientRect();
+    var h = Math.round(r.height * 10) / 10, w = Math.round(r.width * 10) / 10;
+    if (!(h > 1) || !(w > 1)) return;
+    if (!IMG_H[src]) IMG_N++;
+    IMG_H[src] = [w, h];
+    // 一次会话里别攒太多:超量就整本重记(代价是再滚一趟列表才重新有账)
+    if (IMG_N > 900) { IMG_H = Object.create(null); IMG_N = 0; }
+  }
+  function holdImg(im) {
+    var src = imgKey(im);
+    if (!src) return;
+    if (im.complete && im.naturalWidth) {
+      if (im.__bwHoldH) { im.__bwHoldH = 0; im.style.height = ''; }
+      if (!IMG_H[src]) noteImg(im, src);
+      return;
+    }
+    var rec = IMG_H[src];
+    if (!rec) return;
+    if (Math.abs(im.getBoundingClientRect().width - rec[0]) > 2) return;
+    if (im.__bwHoldH === rec[1]) return;
+    im.__bwHoldH = rec[1];
+    im.style.height = rec[1] + 'px';
+  }
+  function holdAdded(nodes) {
+    for (var i = 0; i < nodes.length; i++) {
+      var k = nodes[i];
+      if (!k || k.nodeType !== 1) continue;
+      if (k.tagName === 'IMG') holdImg(k);
+      if (k.getElementsByTagName) {
+        var im = k.getElementsByTagName('img');
+        for (var j = 0; j < im.length; j++) holdImg(im[j]);
+      }
+    }
+  }
+  function releaseHold(im, src) {
+    if (im.__bwHoldH) { im.__bwHoldH = 0; im.style.height = ''; }
+    if (src) noteImg(im, src);
+  }
+  document.addEventListener('load', function (e) {
+    var im = e.target;
+    if (!im || im.tagName !== 'IMG') return;
+    releaseHold(im, imgKey(im));
+  }, true);
+  document.addEventListener('error', function (e) {
+    var im = e.target;
+    if (!im || im.tagName !== 'IMG') return;
+    if (im.__bwHoldH) { im.__bwHoldH = 0; im.style.height = ''; }
+  }, true);
+  /* 只盯新增节点(不看属性),一次改动只遍历被加进来的那些,别学瀑布流那样
+     在观察器里做全文档查询 —— 那条实测过一秒 380 轮会把主线程吃满。
+     观察对象写死 `document`:注入发生在 onPageStarted,那会儿 body 还没有,
+     `document.body` 是 null → observe(null) 抛异常被 catch 掉,整套钉位就静默失效了
+     (实测第一版就是这样,pins 恒为 0)。document 节点一定在,subtree 覆盖到 #app。 */
+  try {
+    new MutationObserver(function (ms) {
+      for (var i = 0; i < ms.length; i++) {
+        var a = ms[i].addedNodes;
+        if (a && a.length) holdAdded(a);
+      }
+    }).observe(document, {childList: true, subtree: true});
+  } catch (e) { /* ignore */ }
+  /* 注入之前就已经加载完的图不会再发 load,补一趟总的(只补没账的,读一次布局) */
+  setTimeout(function () {
+    var im = document.getElementsByTagName('img');
+    for (var i = 0; i < im.length; i++) if (imgKey(im[i])) holdImg(im[i]);
+  }, 1600);
+
   /* CSS Grid 不支持 masonry(Chrome 145 实测),行轨切成 2px 细格、按卡片高度写
      span 等价于瀑布流,且完全不动 DOM 结构(站点的无限追加、事件代理都不受影响)。
 
@@ -1003,6 +1227,14 @@
          容器换人时卡片上还挂着上一份状态写的行位,直接按站点账本起锚会跳位 */
       st.stFresh = true;
       feedStates.set(wrap, st);
+      /* pinnedWraps 是**强引用数组**(feedStates 是 WeakMap,它管不了这里):
+         修剪原先只发生在 clearMasonry 里,而那是"非宽屏"才走的分支 ——
+         平板恒宽屏,于是容器每被换一次(路由/整页重建)就有一个已脱离文档的
+         信息流子树被永久留在数组里。新状态建立时顺手把断开的清掉,数组长度
+         就跟着"当前活着的容器数"走。 */
+      for (var q = pinnedWraps.length - 1; q >= 0; q--) {
+        if (!pinnedWraps[q].isConnected) pinnedWraps.splice(q, 1);
+      }
       pinnedWraps.push(wrap);
     }
     return st;
@@ -1796,6 +2028,15 @@
   }
 
   function layoutMasonry() {
+    /* 九宫格裁剪必须排在测量/落位**之前**:它会把第 9 张起的图收掉、把卡片高度
+       改掉(实测 12 图卡 799→665,差 134px;15 图卡差 267px)。原先它只挂在
+       refresh()(滚动事件 + 250ms 防抖)上,而排布跑在 MutationObserver 的微任务里
+       —— 新卡先按"还没裁剪"的高度被量到、写上行位,~84ms 后裁剪才落地,卡片一矮,
+       同列下方的卡片被 shift 整体顶上去 134~267px,用户看到的就是"滑动时上下乱跳"。
+       实测(.rundata/nine_race2.py):新卡插入瞬间 row=8729/span 399,84ms 后变成
+       span 333 —— 卡片顶没动、高矮了 134px,整列下方跟着挪。
+       放到最前面,量到的就是终态高度;clampNineGrid 自身幂等,重复调用无副作用。 */
+    try { clampNineGrid(); } catch (e) { /* ignore */ }
     /* 手机单列绝不接管:watchFeed / ResizeObserver 的回调也会直接走到这里,
        不设守卫的话单列同样会被写行位、.hei 被减半 —— 记账消耗快一倍,
        窗口推进过早,手机反而患上平板才有的病。归还交给 masonry() 的
@@ -1917,7 +2158,19 @@
   }
 
   function masonry() {
-    if (!WIDE.matches) { clearMasonry(); return; }
+    if (!WIDE.matches) {
+      /* 交还只做"确实接管过"的那一次:clearMasonry 要跑一趟全文档查询
+         (`.wb-item-wrap, .profile-header, .lite-btn-more`)、逐张卡读 offsetHeight
+         (强制布局)并把站点账本里的 .hei 按实测重写一遍 —— 而 masonry() 挂在每个
+         滚动事件上,窄屏下每个事件都重来一遍纯属浪费,还会反复覆盖站点自己的量值。
+         `st.ourPad !== null` 正是"这套状态还攥在我们手里"的标记,交还后归 null,
+         这里自然不再进;重新进入宽屏时 layoutPinned 又会把它置上。 */
+      for (var q = 0; q < pinnedWraps.length; q++) {
+        var stq = feedStates.get(pinnedWraps[q]);
+        if (stq && stq.ourPad !== null) { clearMasonry(); break; }
+      }
+      return;
+    }
     if (masonTimer) return;
     masonTimer = setTimeout(function () {
       masonTimer = null;
@@ -1943,7 +2196,10 @@
       }).observe(document.documentElement, {childList: true, subtree: true});
     }
   } catch (e) { /* ignore */ }
-  try { window.addEventListener('resize', function () { masonry(); }); } catch (e) { /* ignore */ }
+  /* 转屏/分屏只改视口不改 DOM,变异观察器唤不醒 refresh —— 博主主页的
+     "窄屏还原结构"就永远不跑(实测 1280→411 之后三颗按钮还卡在卡片的
+     .bw-prof-acts 里、底栏空着,手机上那颗"关注"直接没了)。这里补一刀。 */
+  try { window.addEventListener('resize', function () { masonry(); schedule(); }); } catch (e) { /* ignore */ }
 
   /* 路由派生的结构标记:只看 location.pathname,不碰 DOM,所以可以在注入的那一刻
      和每次 DOM 变异时同步打。原来这些标记要等 schedule() 的 250ms 节流跑完 refresh()
@@ -1968,9 +2224,205 @@
       root.classList.toggle('bw-page-home', !deep && !(p.indexOf('/search') === 0 || p.indexOf('/s/') === 0
         || p.indexOf('/msg') === 0 || p.indexOf('/message') === 0 || p.indexOf('/profile') === 0
         || p.indexOf('/my') === 0 || p.indexOf('/u/') === 0));
+      /* 第四套页面架构:Tailwind 工具类写的超话/话题页 —— 根节点是
+         `#app > div.root.w-full.max-w-[750px]`,既没有 .main-wrap 也没有 .m-top-bar,
+         于是路由标记兜底落成 bw-page-home,条带/卡片/顶栏规则**一条都不命中**
+         (实测 1280 下:根只有 797px 居中,而它的顶栏与底栏是
+          `fixed top-0 w-full max-w-[750px]` —— fixed 的 100% 按视口算 1280,
+          再被我们那条"内层 max-width 作废"抹掉 750 上限,于是宽 1280、起点 241.5,
+          右侧 241px 直接甩出屏外)。
+         按**结构**认这一族,不按路由字符串猜。判据用廉价的三条短路:
+         根有 .root 类 + 类名里带 max-w- 前缀(Tailwind 特征) + 没有 .main-wrap;
+         只有前两条都过才会去查 .main-wrap,所以信息流那些页不会多付查询成本。 */
+      var appEl = document.getElementById('app');
+      var firstEl = appEl && appEl.firstElementChild;
+      var tw = !!(firstEl && firstEl.classList && firstEl.classList.contains('root') &&
+        /(^|\s)max-w-/.test(firstEl.className) && !document.querySelector('.main-wrap'));
+      root.classList.toggle('bw-tw', tw);
     } catch (e) { /* ignore */ }
   }
   syncRouteClasses();
+
+  /* ===== 博主主页(/p/<uid> 那一族)大屏重排:左侧常驻资料卡 + 右侧微博流 ===== */
+  /* 站点把这一页做成一整条竖列:头部(封面+头像+资料)、切换栏、微博卡片,
+     三者都是同一个父容器下的**兄弟节点**。要在大屏上变成"左边一张常驻卡、
+     右边微博流",得把它们分成两组 —— CSS 没有"包一层"的能力,所以这里挪节点,
+     CSS 只负责两栏与卡片样式(见 theme.js 的 html.bw-prof 段)。
+     只动结构、不复制内容、不改事件:按钮整颗搬进卡片,点击/菜单全由站点自己接。
+     窄屏(<768px)会把结构还原,手机版式一点不动。 */
+  /** 往上走到 container 的直接子节点(不在这一族里返回 null) */
+  function upTo(container, node) {
+    var cur = node;
+    while (cur && cur.parentElement !== container) cur = cur.parentElement;
+    return cur;
+  }
+
+  /* 拆掉旧版套出来的嵌套左列:每一层壳只装得下一棵子树,把子节点提上来再删壳 */
+  function unwrapSides(side) {
+    var shells = side.querySelectorAll('.bw-prof-side');
+    for (var q = 0; q < shells.length; q++) {
+      var sh = shells[q];
+      if (!sh.isConnected) continue;
+      while (sh.firstChild) sh.parentElement.insertBefore(sh.firstChild, sh);
+      sh.remove();
+    }
+  }
+
+  function profParts() {
+    var nav = document.querySelector('nav.m-top-nav');
+    var cov = document.querySelector('.profile-cover');
+    if (!nav || !cov) return null;
+    /* 容器不能按"切换栏往上数两级"来认:分组做完之后那两级正好落在我们自己造的
+       .bw-prof-side 里,于是每一次 refresh 都往左列内部再套一层左列
+       (实测一份文档里 310 层,而 side 的 gridRow 是按子节点数算的,套到第二层
+       就只剩 span 3 —— 左列滚两屏就不再粘住)。先认已有的 side,容器取它的父级。 */
+    var side = document.querySelector('.bw-prof-side');   // 树序第一个 = 最外那层
+    if (side) unwrapSides(side);
+    var W = side ? side.parentElement : (nav.parentElement && nav.parentElement.parentElement);
+    if (!W || !W.children) return null;
+    var A = upTo(side || W, cov) || upTo(W, cov);         // 头部那一块(里面是 .profile-cover)
+    var B = upTo(side || W, nav) || upTo(W, nav);         // 切换栏那一行
+    return (A && B && A !== B) ? {W: W, A: A, B: B, cov: cov, side: side} : null;
+  }
+
+  /** 底栏里要搬进卡片的三颗:关注/已关注 / 私信 / “的热门”弹出菜单里的“全部微博” */
+  function profActions() {
+    var bar = document.querySelector('.m-tab-bar.m-bar-panel');
+    if (!bar) return [];
+    var out = [];
+    /* 只取操作行的**直接**子项:站点"私信"那颗里面还套着一颗同名 .m-diy-btn,
+       全量扫会把里外两颗都抓走(实测多出一颗空按钮) */
+    var btns = bar.querySelectorAll('.m-ctrl-box > .m-diy-btn');
+    for (var i = 0; i < btns.length; i++) {
+      var t = (btns[i].innerText || '').replace(/\s+/g, '');
+      /* 关注那颗按站点自己的 .m-followBtn 认,不按文案:未关注时它写"关注"、
+         已关注时写"已关注",只比"已关注"会把博主主页上唯一那颗关注按钮留在底栏里,
+         而大屏档底栏整条 display:none —— 入口直接不见了 */
+      if (btns[i].querySelector('.m-followBtn') || t === '关注' || t === '已关注') {
+        btns[i].classList.add('bw-act-follow');
+        out.push(btns[i]);
+      } else if (t === '私信') {
+        btns[i].classList.add('bw-act-dm');
+        out.push(btns[i]);
+      }
+    }
+    var all = null, els = bar.querySelectorAll('a, li, h4, span');
+    for (var j = 0; j < els.length; j++) {
+      if ((els[j].innerText || '').replace(/\s+/g, '') === '全部微博') { all = els[j]; break; }
+    }
+    if (all) {
+      /* 站点那颗是菜单项(li/a),外面套一层才有按钮的排布与描边。
+         已经套过就复用:这段每次 refresh 都会跑,套了新壳会出现重复按钮 */
+      var host = all.parentElement;
+      if (host && host.classList && host.classList.contains('bw-prof-act')) {
+        out.push(host);
+      } else {
+        var wrap = document.createElement('div');
+        wrap.className = 'bw-prof-act bw-prof-all';
+        wrap.appendChild(all);
+        out.push(wrap);
+      }
+    }
+    return out;
+  }
+
+  /** 只给底栏那两颗打样式钩子,不挪不动 —— 窄屏档按钮本来就留在底栏里,
+   *  CSS 要靠这两个类给"私信"补站点没画的图标。宽屏档它们已经被搬走,
+   *  `.m-ctrl-box > .m-diy-btn` 自然扫不到,重复调用无害。 */
+  function tagBarActions() {
+    var bar = document.querySelector('.m-tab-bar.m-bar-panel');
+    if (!bar) return;
+    var btns = bar.querySelectorAll('.m-ctrl-box > .m-diy-btn');
+    for (var i = 0; i < btns.length; i++) {
+      var t = (btns[i].innerText || '').replace(/\s+/g, '');
+      if (btns[i].querySelector('.m-followBtn') || t === '关注' || t === '已关注') {
+        btns[i].classList.add('bw-act-follow');
+      } else if (t === '私信') {
+        btns[i].classList.add('bw-act-dm');
+      }
+    }
+  }
+
+  function layoutBlogger() {
+    try {
+      var root = document.documentElement;
+      if (!root.classList.contains('bw-cardpage')) { return; }
+      var pt = profParts();
+      if (!pt) { return; }
+      var W = pt.W, A = pt.A, B = pt.B;
+      tagBarActions();
+      /* 窄屏:还原结构(头部与切换栏回到原父容器,去掉常驻容器) */
+      if (!WIDE.matches) {
+        if (!root.classList.contains('bw-prof')) { return; }
+        var s0 = W.querySelector(':scope > .bw-prof-side');
+        if (s0) {
+          if (A.parentElement === s0) W.insertBefore(A, s0);
+          if (B.parentElement === s0) {
+            W.insertBefore(B, A.nextSibling === s0 ? s0 : A.nextSibling);
+          }
+          /* 按钮一颗颗还回底栏的操作行(连同我们给“全部微博”套的那层壳) */
+          var acts0 = pt.cov.querySelector('.bw-prof-acts');
+          if (acts0) {
+            var box = document.querySelector('.m-tab-bar.m-bar-panel .m-ctrl-box') ||
+              document.querySelector('.m-tab-bar.m-bar-panel');
+            if (box) { while (acts0.firstChild) box.appendChild(acts0.firstChild); }
+            acts0.remove();
+          }
+          /* 封面带是我们在大屏档多画的一层,窄屏档用不到(站点那份内联图一直没动) */
+          var band0 = pt.cov.querySelector(':scope > .bw-prof-band');
+          if (band0) { band0.remove(); }
+          s0.remove();
+        }
+        W.classList.remove('bw-prof-wrap');
+        root.classList.remove('bw-prof');
+        return;
+      }
+      /* 真正的容器是"切换栏的父节点"(头部/切换栏/微博卡都是它的子节点),
+         外面还套着一层 —— CSS 选不到无类名的那一层,这里给它打个标记 */
+      W.classList.add('bw-prof-wrap');
+      var side = W.querySelector(':scope > .bw-prof-side');
+      if (!side) {
+        side = document.createElement('div');
+        side.className = 'bw-prof-side';
+        W.insertBefore(side, A);
+      }
+      if (A.parentElement !== side) side.appendChild(A);
+      if (B.parentElement !== side) side.appendChild(B);
+      /* sticky 的约束是这一项自己的网格区:要跨到最后一排,微博卡一多(无限下拉)
+         就跟着加 —— 这一串都是同一个父容器的子节点,数一下就是行数 */
+      var rows = Math.max(2, W.children.length + 2);
+      if (side.style.gridRow !== '1 / span ' + rows) {
+        side.style.gridRow = '1 / span ' + rows;
+      }
+      /* 封面带:站点把封面图作为元素自己的 background 内联写在 .profile-cover 上。
+         大屏档这张卡是"上沿一条 150 的封面 + 下方资料",整卡 cover 会把图铺到文字底下,
+         而 background-size 又只能按整卡算裁切基准 —— 所以抄一条自己的带子出来画,
+         基准回到那 150(与手机档 211 高的封面格同一套)。theme.js 负责隐藏整卡那份。 */
+      var band = pt.cov.querySelector(':scope > .bw-prof-band');
+      if (!band) {
+        band = document.createElement('div');
+        band.className = 'bw-prof-band';
+        pt.cov.insertBefore(band, pt.cov.firstChild);
+      }
+      var src = pt.cov.style.backgroundImage;
+      if (!src || src === 'none') { src = getComputedStyle(pt.cov).backgroundImage; }
+      if (src && src !== 'none' && band.style.backgroundImage !== src) {
+        band.style.backgroundImage = src;
+      }
+      /* 操作按钮搬进卡片(卡片 = .profile-cover,它是两列网格,按钮那行由 CSS 跨列) */
+      var acts = pt.cov.querySelector('.bw-prof-acts');
+      if (!acts) {
+        acts = document.createElement('div');
+        acts.className = 'bw-prof-acts';
+        pt.cov.appendChild(acts);
+      }
+      var wants = profActions();
+      for (var k = 0; k < wants.length; k++) {
+        if (wants[k].parentElement !== acts) acts.appendChild(wants[k]);
+      }
+      if (wants.length) root.classList.add('bw-prof');
+    } catch (e) { /* ignore */ }
+  }
 
   function refresh() {
     try {
@@ -1990,7 +2442,6 @@
          平板上导航是左侧竖栏、发博球贴右下角,两者分处两角、都不压内容,
          收起来反而让人随时找不到入口 —— 所以宽屏下不收起(顶栏在平板本来就随内容滚走) */
       var hidden = trackScroll(y) && !WIDE.matches;
-      var navEl = document.getElementById('bw-nav');
       // 撰写页、正文页(正文/评论/点赞列表)与打开的视频层要沉浸式观看,隐藏悬浮件;
       // 这些页面/图层自带返回箭头,配合系统返回键足够退出。
       // 同时在 <html> 上打 bw-deep 标记,theme.js 据此套用正文页的大屏双栏布局
@@ -2038,6 +2489,7 @@
          但版式要单独按阅读栏排,给 theme.js 一个结构标记 */
       root.classList.toggle('bw-article', !!document.querySelector('.m-feed .f-art, h2.f-art-tit'));
       killAppNags();
+      layoutBlogger();      /* 大屏两栏:先分组再让 masonry 认容器(这一族其实没有信息流网格,顺序只为稳妥) */
       masonry();
       watchFeed();
       paintComposeIcons();
@@ -2054,24 +2506,20 @@
          设置族(老架构 #box + 服务端直出子页) / 头条文章 / 超话 / 热搜条目页
          都自然落在 !isMainTab() 里,不用再逐个枚举。
          全屏看图与全屏视频层即使在主 tab 上也要临时收掉(悬浮件 z 比它们高)。 */
-      var immersive = !isMainTab() || overlayOpen();
-      if (navEl) {
-        navEl.style.display = immersive ? 'none' : 'flex';
-        navEl.classList.toggle('bw-scroll-hide', hidden);
-      }
+      /* overlayOpen() 在这一次 refresh 里只算一遍：它内部是三个 querySelector +
+         可能两次 getComputedStyle，而 refresh 挂在每个滚动事件上(profiler 里
+         pswpOpen 一项就占 2.4%)。同一个同步批次里结果不可能变，算一次分给
+         overlayEdge 与 syncOverlayChrome 共用。 */
+      var ov = overlayOpen();
+      lastHidden = hidden;
+      /* 换态时 overlayEdge 会立刻自己摆一遍；没换态这一趟也照摆，
+         路由/滚动带进来的变化同样要落回悬浮件上 */
+      overlayEdge(ov);
+      syncOverlayChrome(ov);
       var tb = document.querySelector('.lite-topbar.main-top');
       if (tb) {
         /* 玻璃底已在 theme.js 常驻(不再按滚动位置切换),这里只管上滑隐藏 */
         tb.classList.toggle('bw-hidden', hidden);
-      }
-      var fabEl = document.getElementById('bw-fab');
-      var disc = searchDiscuss();
-      /* 有那条讨论栏时:球顶替它(主题样式在 theme.js 按这个类切换) */
-      root.classList.toggle('bw-fab-disc', !!disc);
-      if (fabEl) {
-        fabEl.classList.toggle('bw-hide', disc ? overlayOpen()
-          : (immersive || !document.querySelector('.lite-iconf-releas')));
-        fabEl.classList.toggle('bw-scroll-hide', hidden);
       }
       syncFloatChrome(deep, hidden);      syncDrop();
       fixSearchHint();
