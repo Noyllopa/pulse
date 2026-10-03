@@ -107,6 +107,13 @@ public class MainActivity extends AppCompatActivity {
     private boolean galleryOpen = false;
     /** 撰写/转发/讨论这类编辑页:整页不滚文档,下拉刷新要交还手势(见 syncRefreshGesture) */
     private boolean editorOpen = false;
+    /**
+     * 黑底满屏的那两层(站点视频浮层 .mwb-layer / 看图器 .pswp)是否开着。
+     * 开着时系统栏那两条带要跟着换成黑 —— 网页被 content_holder 的 padding 顶在
+     * 状态栏下面,黑屏上面那条带是原生画的,不换就压着一条页面底色(实测深色 17 压 0、
+     * 浅色 241 压 0)。由 nav.js 按这两层的开合报上来(见 setMediaBars)。
+     */
+    private boolean mediaBars = false;
     private ProgressBar progressBar;
     private View errorView;
     private ValueCallback<Uri[]> filePathCallback;
@@ -339,12 +346,35 @@ public class MainActivity extends AppCompatActivity {
         updateBarAppearance();
     }
 
-    /** 系统栏图标深浅色跟随应用主题(状态栏透明后只能靠 appearance 控制) */
+    /** 系统栏图标深浅色跟随应用主题(状态栏透明后只能靠 appearance 控制);
+     *  黑底那两层开着时整条带是黑的,图标一律转浅色,见 applyMediaBars */
     private void updateBarAppearance() {
         WindowInsetsControllerCompat controller =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-        controller.setAppearanceLightStatusBars(!isDarkTheme());
-        controller.setAppearanceLightNavigationBars(!isDarkTheme());
+        controller.setAppearanceLightStatusBars(!mediaBars && !isDarkTheme());
+        controller.setAppearanceLightNavigationBars(!mediaBars && !isDarkTheme());
+    }
+
+    /**
+     * 把系统栏那两条带换成黑(视频层/看图器开着)或换回页面底色。
+     * 两条都要写:API 35 起窗口自己那两条 statusBarColor 对 edge-to-edge 应用已经不生效,
+     * 现在真正露出来的是布局根 View 的背景(它垫在 content_holder 让出的那条 padding 下面);
+     * 而 29~34 上窗口那条仍会盖在上面,所以两边一起改,免得只在一档设备上有效。
+     */
+    private void applyMediaBars(boolean on) {
+        if (mediaBars == on) {
+            return;
+        }
+        mediaBars = on;
+        int bg = on ? Color.BLACK : ContextCompat.getColor(this, R.color.app_background);
+        View holder = findViewById(R.id.content_holder);
+        View root = holder != null && holder.getParent() instanceof View ? (View) holder.getParent() : null;
+        if (root != null) {
+            root.setBackgroundColor(bg);
+        }
+        getWindow().setStatusBarColor(bg);
+        getWindow().setNavigationBarColor(bg);
+        updateBarAppearance();
     }
 
     /**
@@ -565,6 +595,8 @@ public class MainActivity extends AppCompatActivity {
                 progressBar.setVisibility(View.VISIBLE);
                 progressBar.setProgress(5);
                 syncRefreshGesture();
+                // 整页重载后页面那侧的开合记账就没了,原生这边也要跟着落回常态
+                applyMediaBars(false);
                 injectPageScripts(view);
             }
 
@@ -883,6 +915,17 @@ public class MainActivity extends AppCompatActivity {
                 syncRefreshGesture();
             });
         }
+
+        /**
+         * 黑底满屏那两层(视频浮层 / 看图器)的开/合:开着就把系统栏那两条带换成黑。
+         * 与 setGalleryOpen 分开报,是因为那条只管"返回键先关谁"和长按存图,
+         * 而这一层判定还包含视频浮层,两种用途的开关时机不一样。
+         */
+        @JavascriptInterface
+        public void setMediaBars(final boolean on) {
+            runOnUiThread(() -> applyMediaBars(on));
+        }
+
         /**
          * 撰写/转发/讨论这类编辑页的开/合。SPA 换路由不会重走 onPageStarted,
          * 原生自己看不到 URL 变化,所以由页面脚本按路由报过来(与 setGalleryOpen 同一条路子)。

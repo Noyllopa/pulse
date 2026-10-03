@@ -374,15 +374,19 @@
      48 一格、VideoJS 图标字体,全是站点已经加载好的那份 CSS,我们只写定位与行为。
      每颗按钮都要带 vjs-button:图标字号那条是 `.vjs-button > .vjs-icon-placeholder:before`,
      漏了它那颗音量键会退回 1em(12px),比播放/全屏的 1.8em(21.6px)小一整号。
-     live 动图不在此列(它是 1~3s 的循环短片,加了反而像坏了的播放器),分辨同 media_save.js:
-     看 src 里有没有 `livephoto=`。 */
-  function isLiveSrc(v) {
+     live 图与动图不在此列(见下面 isLoopClipSrc)。 */
+  /* 站点把"点开就是循环放一小段"的两种卡片都渲染成 <video>,它们都不该有播放器控件条:
+     live 图的直链固定是 video.weibo.com/media/play?livephoto=<编码后的 .mov>
+     (见 media_save.js#saveMediaUrl);动图是 gif 转的 mp4,直链带 `label=gif_mp4`
+     (实测 2.07s、212x204)。分辨只看这两个标记,不看时长 —— 元数据是异步到的,
+     按时长判会让控件条先冒出来再收回去。 */
+  function isLoopClipSrc(v) {
     var s = v.currentSrc || v.src || '';
     if (!s && v.querySelector) {
       var so = v.querySelector('source');
       s = so ? (so.src || so.getAttribute('src') || '') : '';
     }
-    return s.indexOf('livephoto=') >= 0;
+    return s.indexOf('livephoto=') >= 0 || s.indexOf('gif_mp4') >= 0;
   }
 
   function liveRoot() {
@@ -393,13 +397,13 @@
     return p;
   }
 
-  /* 当前这一页的真视频:矩形落在视口里、且不是 live 动图 */
+  /* 当前这一页的真视频:矩形落在视口里、且不是循环短片(live 图/动图) */
   function galVideo(p) {
     var vs = p.querySelectorAll('video');
     for (var i = 0; i < vs.length; i++) {
       var r = vs[i].getBoundingClientRect();
       if (r.width < 40 || r.right < 20 || r.left > innerWidth - 20) continue;
-      if (isLiveSrc(vs[i])) continue;
+      if (isLoopClipSrc(vs[i])) continue;
       return vs[i];
     }
     return null;
@@ -781,7 +785,7 @@
        "这种微博的播放页下面没有进度条那一排"就是它。控件条由 buildGalBar 自己搭
        (借 video.js 的类名吃站点的样式),所以这里一律关掉浏览器原生控件:
        原生那条在闭 shadow root 里改不了样式,留着就是两种样子叠在一起。
-       live 动图不搭也不加(它是 1~3s 的循环短片) —— 分辨看 isLiveSrc。 */
+       live 图与动图不搭也不加(它们是循环短片) —— 分辨看 isLoopClipSrc。 */
     var groot = liveRoot();
     if (groot) {
       var gal = groot.querySelectorAll('video');

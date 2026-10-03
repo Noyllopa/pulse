@@ -584,7 +584,30 @@
     return r.width > 0 && r.height > 0;
   }
 
-  function overlayOpen() { return videoLayerOpen() || pswpOpen() || sheetOpen(); }
+  /* 最近一次 overlayOpen() 读到的"黑底那两层"状态。留这个数而不是让 syncMediaBars
+     自己再判一遍:两个分量各要一次 querySelector + 可能两次 getComputedStyle,
+     而 refresh 挂在每个滚动事件上(profiler 里 pswpOpen 一项就占 2.4%),不能量两遍。 */
+  var mediaLayerWasOpen = false;
+
+  function overlayOpen() {
+    /* 黑底满屏的那两层先单独记一笔,给 syncMediaBars 用(见那里的注释) */
+    var media = videoLayerOpen() || pswpOpen();
+    mediaLayerWasOpen = media;
+    /* 卡片"..."菜单那层是白底面板,只算"有东西压住悬浮件",不算黑底 */
+    return media || sheetOpen();
+  }
+
+  /* 系统栏那两条带是原生画的(网页被 content_holder 的 padding 顶在状态栏下面)。
+     黑底那两层开着时不换,黑屏上面就压着一条页面底色 —— 实测深色 17 压 0、浅色 241 压 0。 */
+  var mediaBarsSent = null;
+  function syncMediaBars() {
+    if (mediaLayerWasOpen === mediaBarsSent) return;
+    if (!window.BwNative || !BwNative.setMediaBars) return;
+    try {
+      BwNative.setMediaBars(mediaLayerWasOpen);
+      mediaBarsSent = mediaLayerWasOpen;
+    } catch (e) { /* ignore */ }
+  }
 
   /* 悬浮导航与发博按钮的显隐：只看"是不是主 tab"+"有没有浮层压在上面"。
      从 refresh() 里摘出来单独成函数，是因为浮层的开合一刀不能等 refresh —— 见 overlayEdge。 */
@@ -627,11 +650,20 @@
   var ovWasOpen = null;
 
   function overlayEdge(ov) {
+    /* 黑底那两层的换态不等合计 ov 的边沿:看图器关掉的同时卡片菜单可能正开着,
+       ov 一直是 true,而系统栏该换回页面底色。放在这里是因为 refresh 与
+       .pswp/.mwb-layer 的观察器两条路都过这里。 */
+    syncMediaBars();
     if (ov === ovWasOpen) return;
     ovWasOpen = ov;
     syncOverlayChrome(ov);
     /* 收起这一头沿用看图器收合动画的时长再补一次：动画期间尺寸还是满屏 */
-    if (!ov) setTimeout(function () { syncOverlayChrome(overlayOpen()); }, 420);
+    if (!ov) {
+      setTimeout(function () {
+        syncOverlayChrome(overlayOpen());
+        syncMediaBars();
+      }, 420);
+    }
   }
 
   /* 站点的"打开APP查看更多精彩内容"引导:WOUI 的 .woo-modal(z9999 满屏)
@@ -772,6 +804,18 @@
     {k: 'like', label: '赞', icon: ICONS.like, sel: '.lite-page-editor .lite-iconf-like'}
   ];
 
+  /* 站点的编辑条/表情面板在 body 上挂 touchstart 做"点到框外就收起"。这里补一次这种
+     触摸:target 直接给 body —— 它只被 body 及其祖先上的监听收到,不会命中任何站内控件,
+     所以不会顺手点到别的东西。 */
+  function tapOutsideBody() {
+    try {
+      var t = new Touch({identifier: 1, target: document.body, clientX: 1, clientY: 1});
+      document.body.dispatchEvent(new TouchEvent('touchstart', {
+        bubbles: true, cancelable: true, touches: [t], changedTouches: [t]}));
+      return true;
+    } catch (e) { return false; }
+  }
+
   function buildFloatChrome() {
     if (!document.getElementById('bw-fback')) {
       var b = document.createElement('div');
@@ -810,8 +854,27 @@
         if (!item) return;
         var def = null;
         for (var i = 0; i < ACTS.length; i++) if (ACTS[i].k === item.getAttribute('data-k')) def = ACTS[i];
-        var target = def && document.querySelector(def.sel);
-        if (target) target.click();
+        if (!def) return;
+        var target = document.querySelector(def.sel);
+        if (target) { target.click(); return; }
+        /* 评论框一展开,站点就把折叠那一排整排摘掉(换成 .composer-mini-wrap),
+           转发/赞的目标节点临时不在 DOM 里 —— 直接返回就是"按了没反应"。
+           收起这一步站点自己听的是 body 上的 touchstart(组件里 emit update:show),
+           而我们的操作条挂在 documentElement 上:真触摸从这儿向上找不到 body 就抛了,
+           收不掉。所以这里补一次"点到框外",等站点把折叠排挂回来再点它。
+           实测:补的那一下 touchstart 之后,下一个微任务里 .box-left 就已经在了。 */
+        var ta = document.querySelector('.lite-page-editor textarea');
+        if (!ta) return;
+        if (def.k === 'cmt') {
+          /* 已经展开了,再点评论就是把光标交回输入框(不该收起重开,那会清掉正在写的字) */
+          try { ta.focus(); } catch (err) { /* ignore */ }
+          return;
+        }
+        if (!tapOutsideBody()) return;
+        setTimeout(function () {
+          var el = document.querySelector(def.sel);
+          if (el) el.click();
+        }, 0);
       });
     }
   }
