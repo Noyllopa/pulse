@@ -14,6 +14,8 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  # runner 在境外,不吃国内镜像:settings.gradle.kts 里插件仓库那一层只看这个变量
+  PULSE_NO_MIRROR: "1"
 
 jobs:
   publish:
