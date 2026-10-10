@@ -41,13 +41,48 @@
       return false;
     }
 
+    /* 垫圆角底要读像素,只能走 crossOrigin 那条路;而 sinaimg 这类 CDN 大多不发
+       CORS 头 —— 发出去的请求**全部作废**(实测一次看图就积出 89 条
+       "Access to image … blocked by CORS",source 正是 #&gid=… 那一页)。
+       弱网下这些注定白跑的请求挤掉同域那 6 条连接,真正要显示的图片反而排不上队,
+       用户看到的就是"网络不好时刷流/打开图片卡死"。
+       所以三件事:①同一个地址只试一次(成/败都记账,失败也记 —— 别再试);
+       ②同一个域名错一次就拉黑(要么它不发 CORS,要么它此刻根本不通);
+       ③同一地址在飞时后来的元素排队等结果,不再各发一份。
+       代价:被拉黑的这一档这次会话里没有圆角底,与"处理失败"同一种退化。 */
+    var BADGE_DONE = Object.create(null);    // url -> dataURL | null(试过,不适用)
+    var BADGE_BAD = Object.create(null);     // 不发 CORS / 取不到的源
+    var BADGE_GOING = Object.create(null);   // url -> [回调]
+
+    function settleBadge(url, data) {
+      BADGE_DONE[url] = data || null;
+      var cbs = BADGE_GOING[url] || [];
+      delete BADGE_GOING[url];
+      if (!data) return;
+      for (var i = 0; i < cbs.length; i++) {
+        try { cbs[i](data); } catch (e) { /* ignore */ }
+      }
+    }
+
     function badge(url, apply) {
+      var origin;
+      try { origin = new URL(url, location.href).origin; } catch (e) { return; }
+      if (BADGE_BAD[origin]) return;
+      if (url in BADGE_DONE) {
+        if (BADGE_DONE[url]) apply(BADGE_DONE[url]);
+        return;
+      }
+      if (BADGE_GOING[url]) { BADGE_GOING[url].push(apply); return; }
+      BADGE_GOING[url] = [apply];
       var im = new Image();
       im.crossOrigin = 'anonymous';
       im.onload = function () {
         try {
           var w = im.naturalWidth, h = im.naturalHeight;
-          if (!w || !h || Math.max(w, h) > MAX_SIDE || !hasAlpha(im)) return;
+          if (!w || !h || Math.max(w, h) > MAX_SIDE || !hasAlpha(im)) {
+            settleBadge(url, null);
+            return;
+          }
           var c = document.createElement('canvas');
           c.width = w;
           c.height = h;
@@ -63,10 +98,13 @@
           ctx.closePath();
           ctx.fill();
           ctx.drawImage(im, 0, 0, w, h);
-          apply(c.toDataURL('image/png'));
-        } catch (e) { /* ignore */ }
+          settleBadge(url, c.toDataURL('image/png'));
+        } catch (e) { settleBadge(url, null); }
       };
-      im.onerror = function () { /* ignore */ };
+      im.onerror = function () {
+        BADGE_BAD[origin] = 1;
+        settleBadge(url, null);
+      };
       im.src = url;
     }
 
@@ -103,13 +141,21 @@
     }
 
     /**
-     * 圆形小头像反相的通用兜底(theme.js 的 6x 规则之外的场景)。
+     * 小图被算法加深误判成"图标"的通用兜底(theme.js 的 6x 规则之外的场景)。
+     *
+     * 两类命中:
+     *  - **圆形小头像**:加深本身不动不透明图片,但"垫白色圆角底"会把圆形头像
+     *    变成深色页面上的白方块。判据 = 近正方形 + 圆形裁切。
+     *  - **方角微博缩略图**(消息列表右侧那格 50x50):整张被反相 —— 实测浅档均值
+     *    灰 59 → 深档 250,白块压深底(2026-10-07 用户报"@我的/评论/赞 右侧缩略图
+     *    部分被反色")。它没有圆角,按 CDN 归属认出(头像是 /crop.、表情在
+     *    face.t.sinajs.cn、功能图标在 h5…/upload/)。
      *
      * theme.js 那条 `.m-avatar-box .m-img-box img` 只罩得住主流头像位;站点模板里
      * 还有不带 .m-avatar-box 的头像位(榜单卡 card71 的 span.m-img-box、
-     * 搜索讨论条里的本人小头像等)。反相阈值随设备/WebView 版本/dpr 变化
-     * (同一枚头像,一台设备反相、另一台正常,两台模拟器+真机均实测过),
-     * 所以兜底不猜阈值、只按形状判定:小 + 近正方 + 圆形裁切,命中即上 6x 躲法。
+     * 搜索讨论条里的本人小头像等),以及这里的消息缩略图。
+     * 加深的"图标档"阈值随设备/WebView 版本/dpr 变化(同一枚头像,一台设备反相、
+     * 另一台正常,多台设备实测过),所以兜底不猜阈值、只按形状与来源认内容图。
      *
      * 父盒贴身的直接放大;**父盒不贴身的先包壳再放大**:壳与原图同尺寸、
      * 同圆角、同 display(inline 除外,升 inline-block),视觉零变化 ——
@@ -118,7 +164,7 @@
      * 一起丢弃,MutationObserver 下个扫描周期(200ms)会对新 img 重新判定,自愈。
      * 判定全程不读像素(sinaimg 无 CORS 也读不到)、不换 src、不多发请求。
      */
-    function fixAvatarImg(img) {
+    function fixSmallImg(img) {
       if (img.__bwAv) return;
       var r = img.getBoundingClientRect();
       var side = Math.min(r.width, r.height);
@@ -131,7 +177,20 @@
       if (!host) return;
       var hostRad = 0;
       try { hostRad = parseFloat(getComputedStyle(host).borderRadius) || 0; } catch (e) { /* ignore */ }
-      if (Math.max(parseFloat(rad) || 0, hostRad) < side * 0.35) return; // 不是圆形裁切
+      var round = Math.max(parseFloat(rad) || 0, hostRad) >= side * 0.35;
+      /* 方角的那一档:按 CDN 归属认内容图,不枚举派生图名 —— 站点的
+         thumbnail/thumb180/orj360/orj480/mw690/bmiddle… 十几叫法,实测同一屏就同时
+         出现 orj360 与 orj480、thumb180(只列几个会漏)。
+         排除:头像的 /crop.、/square.,表情域 face.t.sinajs.cn,功能图标 h5…/upload/。 */
+      var src = img.currentSrc || img.src || '';
+      /* 站点静态资源域(d.sinaimg.cn/prd/…)上是 UI 图标而不是内容图 —— 它们本来就按
+         浅色卡面画,交给浏览器的算法加深去适配才对。套壳等于把加深挡掉,登录页那两颗
+         实测就坏了:扫码变成深灰一坨(图标与底同色)、微信露出一圈亮边(摘壳后是中性灰)。 */
+      if (/^https?:\/\/d\.sinaimg\.[a-z.]+\//i.test(src)) return;
+      var photo = /sinaimg\.[a-z.]+\//i.test(src) &&
+        !/\/(crop\.|square\.)/i.test(src) &&
+        !/face\.t\.sinajs|h5\.sinaimg\.[a-z.]+\/upload\//i.test(src);
+      if (!round && !photo) return;
       img.__bwAv = true;
       var hr = host.getBoundingClientRect();
       var snug = Math.abs(hr.width - r.width) <= 4 && Math.abs(hr.height - r.height) <= 4;
@@ -258,7 +317,7 @@
         timer = null;
         try {
           var imgs = document.images;
-          for (var i = 0; i < imgs.length; i++) { fixImg(imgs[i]); fixAvatarImg(imgs[i]); fixPassportLogo(imgs[i]); }
+          for (var i = 0; i < imgs.length; i++) { fixImg(imgs[i]); fixSmallImg(imgs[i]); fixPassportLogo(imgs[i]); }
           // CSS 背景图只可能是叶子节点(如未登录页 logo),避免全量 getComputedStyle
           var leaves = document.querySelectorAll('i,span,div,a,em');
           for (var j = 0; j < leaves.length; j++) {
@@ -300,7 +359,7 @@
     try {
       // 未登录页的微博 logo 是 CSS 背景图且小于尺寸阈值,直接用官方徽章覆盖。
       //
-      // 顶栏 pulse. 字标:算法加深对这张图的处置**随元素状态而变**(两台模拟器实测)——
+      // 顶栏 pulse. 字标:算法加深对这张图的处置**随元素状态而变**(实测)——
       // 登录态(.lite-iconf-profile)不反相,故要给浅色版才看得见;
       // 未登录态(.unlogin-logo)整张图会被反相,给浅色版反而变黑,必须给深色版。
       // 两条规则按状态分别给源图,最终两边都呈现浅色;
@@ -417,7 +476,40 @@
            实测 border-top:1px rgba(0,0,0,0)),算法加深会把它画成一条不透明亮灰 ——
            私信页每行顶部实测亮度 175(页面底 17),就是那条亮线。
            浅色下这层边框本来就是透明的,所以深色下把宽度归零不会丢任何分隔信息。 */
-        '#app .lite-line,#app .lite-li{border-top:0 !important;border-bottom:0 !important;}';
+        '#app .lite-line,#app .lite-li{border-top:0 !important;border-bottom:0 !important;}' +
+        /* 表情面板底部分类导航的选中态:站点写的是实心 #F6F6F6 药丸(实测
+           `.nav li.cur` computed = rgb(246,246,246)),浅色档是"比卡面略暗一档",
+           深色档压在卡面 #191919 上就成了一块白。换类时站点用 background-color
+           过渡(实测 alpha 从 .07 逐帧爬到 1,同时旧项从 .93 退到 0),
+           中途两枚药丸同时发白 —— 用户看到的就是"翻到下一类时标签条闪一下白"。
+           这里改成浅色半透明:压在卡面(25)上合成约 48,托得住又不出白块。 */
+        '#app .emotionGroups .nav li.cur{background:rgba(255,255,255,.10) !important;}' +
+        /* 表情面板的雪碧图被算法加深**按格**改了颜色(同一张图,21 格里只有个别格被改)。
+           实测 default 类:微笑/黑线/可爱三格的蓝通道被压掉一半
+           (真值 156,134,65 → 画上 125,109,29,ΔB-36),同类的汗/哼/挤眼 只降 6~13 ——
+           黄色表情变成发暗的"芥末黄",用户看到的就是"部分表情被反色"。
+           给面板这一棵子树声明 `color-scheme:dark`(= 告诉加深"这块作者自己管深色"),
+           三格的 ΔB 回到 -6~-10,与同类一致,黄色恢复。
+           **只写在面板上,不写 :root**:根上写 dark 会让整个页面的算法加深停摆,
+           而我们这套深色底本来就是"我们自己填色 + 算法加深补背景"两套合起来的。 */
+        '#app .emotionGroups{color-scheme:dark !important;}' +
+        /* 上面那句的连带后果:子树既然自己管深色,算法加深就不再替我们兜
+           "站点写死的浅色底"。实测两处会露出来(手机端 2026-10-07 直接看到分类栏整条白):
+             .nav        背景写死 #FFF     —— 加深时约 #18,现在原样白
+             .dots .dot  背景写死 #E2E2E2  —— 加深后实测 (49,49,49),现在 (226,226,226)
+           所以这两处必须自己给:分类条直接透明(卡面本就是 #191919),
+           圆点给 10% 白 —— 压在卡面(25)上合成约 49,与加深那一版实测值同档。
+           当前页的橙色圆点 (#FF8200) 两版实测都是 (255,130,0),本来就不受加深影响,
+           这里不动 —— 它由 theme.js 统一换成主题蓝(深浅两档同色)。 */
+        '#app .emotionGroups .nav{background:transparent !important;}' +
+        /* 圆点要**只改非当前页**的那几颗:当前页那颗由 theme.js 换成主题蓝,
+           写成 `.dot` 会连它一起盖掉(实测亮点直接没了,2026-10-07 用户报)。 */
+        '#app .emotionGroups .dots .dot:not(.cur){background:rgba(255,255,255,.10) !important;}' +
+        /* 按住表情的选中底:站点用 v-mactive 给 .face-wrap 挂 .m-active 类,
+           底色写死 #E6E6E6(实测按住时 computed = rgb(230,230,230))。
+           浅色档它是"比白卡暗 25",深色档照搬就是黑卡上一块亮灰。
+           给同档的反差:10% 白压在卡面(25)上 ≈ 49,与浅档的 230/255 同一距离。 */
+        '#app .emotionGroups .face-wrap.m-active{background:rgba(255,255,255,.105) !important;}';
       /* ===== 层叠顺序自愈(必须保留) =====
          深色令牌要压在 theme.js 的 #bw-theme **之后**才赢。必须每次都
          appendChild(已存在的节点会被移到末尾);写成"已挂载就不动"的话,

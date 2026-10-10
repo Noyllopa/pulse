@@ -5,12 +5,14 @@ import android.app.DownloadManager;
 import android.content.ClipboardManager;
 import android.content.ClipData;
 import android.view.ContextMenu;
+import android.view.MotionEvent;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.util.Log;
 import android.net.Uri;
 import android.os.Build;
@@ -108,6 +110,24 @@ public class MainActivity extends AppCompatActivity {
     /** 撰写/转发/讨论这类编辑页:整页不滚文档,下拉刷新要交还手势(见 syncRefreshGesture) */
     private boolean editorOpen = false;
     /**
+     * 表情面板开着时从系统返回手势里排除的矩形(WebView 视图坐标,设备 px)。
+     * 面板左缘距屏幕边只有 ~6dp,起手偏左的右滑会撞进手势导航的返回区:
+     * 轻则 touchcancel 冻结翻页,重则直接触发系统返回退出页面(2026-10-07
+     * 实测 x=20 CSS 起手的右滑把整页导航走了)。矩形由 nav.js 按面板开合报上来
+     * (见 setPanelGesture);排除深度超 200dp 的部分系统自动忽略,面板位置在限额内。
+     */
+    private final Rect panelGestureRect = new Rect();
+    private boolean panelGesture = false;
+    /**
+     * 本把手势是不是起在表情面板里(是则这一把不让下拉刷新参与,见 onCreate 里那条
+     * OnTouchListener)。面板里的横滑只要带 6dp 的竖向分量,外层就会把整串事件截走:
+     * 页面收到 ACTION_CANCEL,站点的 panend 不来了,那一半行程白拉 —— 用户报的
+     * "左右滑面板偶尔没反应"就是它(2026-10-07 实测:dy=40 设备 px 即 cancel=1、
+     * panend=0、页不翻)。此前"连拉翻不动"那一轮量不到,是因为对照手势起止同 y,
+     * 竖向分量为 0 就撞不上这个拦截。按起手点让,不整块禁掉刷新:面板只是屏底一小条。
+     */
+    private boolean panelYield = false;
+    /**
      * 黑底满屏的那两层(站点视频浮层 .mwb-layer / 看图器 .pswp)是否开着。
      * 开着时系统栏那两条带要跟着换成黑 —— 网页被 content_holder 的 padding 顶在
      * 状态栏下面,黑屏上面那条带是原生画的,不换就压着一条页面底色(实测深色 17 压 0、
@@ -153,7 +173,7 @@ public class MainActivity extends AppCompatActivity {
     /**
      * 自己解析选图结果,不走 {@code FileChooserParams.parseResult}。
      *
-     * 实测(模拟器 + 系统媒体选择器):结果是 RESULT_OK,但 URI 只挂在 ClipData 上,
+     * 实测(系统媒体选择器):结果是 RESULT_OK,但 URI 只挂在 ClipData 上,
      * {@code Intent.getData()} 为 null,这种组合下 parseResult 给出 0 个文件 ——
      * 网页 input.files 空,撰写页就没有预览。自己收 ClipData 后单张、三张都通。
      */
@@ -299,6 +319,7 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh.setOnRefreshListener(this::reloadPage);
         // WebView 被包进卡片容器后,SwipeRefreshLayout 无法自行判断是否滚到顶部
         swipeRefresh.setOnChildScrollUpCallback((parent, child) -> webView.canScrollVertically(-1));
+        yieldRefreshToPanelGesture();
 
         findViewById(R.id.btn_retry).setOnClickListener(v -> reloadPage());
 
@@ -399,8 +420,46 @@ public class MainActivity extends AppCompatActivity {
     private void syncRefreshGesture() {
         // 看图浮层开着时也不给下拉:它盖住整屏,往下拽是在拽图片,不是要刷新
         // 编辑页(/compose 及其转发/讨论变体)同理:文档不滚,滚的是卡片自己
+        // panelYield:本把手势起在表情面板里,这一把归页面(见 onCreate 的 OnTouchListener)
         swipeRefresh.setEnabled(!isInnerScrollerPage(webView.getUrl()) && !isEditorPage(webView.getUrl())
-                && !groupDropOpen && !galleryOpen && !editorOpen);
+                && !groupDropOpen && !galleryOpen && !editorOpen && !panelYield);
+    }
+
+    /** 起手点(WebView 视图坐标,设备 px)是否落在表情面板矩形里 */
+    private boolean touchStartsInPanel(float x, float y) {
+        return panelGesture && panelGestureRect.contains(Math.round(x), Math.round(y));
+    }
+
+    /**
+     * 起手落在表情面板里的那一把,把下拉刷新让开(见 panelYield)。
+     * 监听挂在 **WebView** 上而不是外层容器上:ViewGroup 在子视图吃掉 ACTION_DOWN 时
+     * 不会走 View.dispatchTouchEvent,挂在 SwipeRefreshLayout 上的监听收不到这一帧
+     * (实测挂上去之后 DOWN 一次都没进)。WebView 自己不设 OnTouchListener,我们挂
+     * 一层只听不吃(返回 false),坐标又与 panelGestureRect 同空间,不用换算。
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private void yieldRefreshToPanelGesture() {
+        webView.setOnTouchListener((view, ev) -> {
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    boolean inside = touchStartsInPanel(ev.getX(), ev.getY());
+                    if (inside != panelYield) {
+                        panelYield = inside;
+                        syncRefreshGesture();
+                    }
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (panelYield) {
+                        panelYield = false;
+                        syncRefreshGesture();
+                    }
+                    break;
+                default:
+                    break;
+            }
+            return false;
+        });
     }
 
     /** 撰写页整页是 .m-main 那种固定列,文档永远停在 y=0 —— 下拉手势必然命中刷新 */
@@ -889,6 +948,19 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> redirectToLogin());
         }
 
+        /**
+         * 用户主动点了只有登录才用得上的入口("我的")。这一按是明确意图,
+         * 不能再被"按返回键跳过登录"和"本次会话已纠正过一次"这两道自动闸门吃掉。
+         */
+        @JavascriptInterface
+        public void requestLogin() {
+            runOnUiThread(() -> {
+                loginSkipped = false;
+                loginCorrected = false;
+                redirectToLogin();
+            });
+        }
+
         /** 首页分组下拉的开/合:展开时把下拉刷新手势让给弹层自己的滚动 */
         @JavascriptInterface
         public void setGroupDrop(final boolean open) {
@@ -940,6 +1012,45 @@ public class MainActivity extends AppCompatActivity {
                 syncRefreshGesture();
             });
         }
+
+        /**
+         * 表情面板的视口矩形(CSS px)。面板开着时把这块从系统返回手势里排除:
+         * 面板左缘距屏幕边只有 ~6dp,起手偏左的右滑撞进手势导航的返回区,轻则
+         * touchcancel 冻结翻页、重则整页被返回掉(见 panelGestureRect 注释)。
+         * w/h 为 0 表示面板已关,交还手势。JS 侧自去重,只在矩形变化时报。
+         */
+        @JavascriptInterface
+        public void setPanelGesture(final int x, final int y, final int w, final int h) {
+            runOnUiThread(() -> {
+                if (w <= 0 || h <= 0) {
+                    if (!panelGesture) {
+                        return;
+                    }
+                    panelGesture = false;
+                    applyPanelGesture();
+                    return;
+                }
+                float d = getResources().getDisplayMetrics().density;
+                Rect r = new Rect(Math.round(x * d), Math.round(y * d),
+                        Math.round((x + w) * d), Math.round((y + h) * d));
+                if (panelGesture && r.equals(panelGestureRect)) {
+                    return;
+                }
+                panelGestureRect.set(r);
+                panelGesture = true;
+                applyPanelGesture();
+            });
+        }
+    }
+
+    /** 把面板矩形落到 WebView 的手势排除区(视图坐标在 setPanelGesture 里已换算好) */
+    private void applyPanelGesture() {
+        if (Build.VERSION.SDK_INT < 29 || webView == null) {
+            return;
+        }
+        webView.setSystemGestureExclusionRects(panelGesture
+                ? java.util.Collections.singletonList(panelGestureRect)
+                : java.util.Collections.emptyList());
     }
 
     private void configureBackNavigation() {

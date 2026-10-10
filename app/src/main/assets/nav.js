@@ -67,15 +67,19 @@
     '<circle class="trk" cx="12" cy="12" r="8.5"></circle>' +
     '<circle class="arc" cx="12" cy="12" r="8.5"></circle></svg>';
 
+  /* 消息项的未读角标壳:内容与站点那颗 .m-bubble 同步(见 syncMsgBadge) */
+  var BADGE = '<em class="bw-badge" aria-hidden="true"></em>';
+
   function build() {
     if (document.getElementById('bw-nav')) return;
     var nav = document.createElement('div');
     nav.id = 'bw-nav';
     var html = '';
     for (var i = 0; i < ITEMS.length; i++) {
-      var ic = ITEMS[i].k === 'home'
-        ? '<span class="bw-icowrap">' + ITEMS[i].icon + RING + '</span>'
-        : ITEMS[i].icon;
+      var ic = ITEMS[i].icon;
+      /* 首页要套壳给刷新环定位,消息要套壳给角标定位 —— 都是"22x22 相对定位壳"同一用途 */
+      if (ITEMS[i].k === 'home') ic = '<span class="bw-icowrap">' + ic + RING + '</span>';
+      else if (ITEMS[i].k === 'msg') ic = '<span class="bw-icowrap">' + ic + BADGE + '</span>';
       html += '<div class="bw-nav-item" data-k="' + ITEMS[i].k + '">' +
         ic + '<span>' + ITEMS[i].label + '</span></div>';
     }
@@ -256,11 +260,24 @@
     } catch (e) { /* ignore */ }
   }
 
+  /* 站点在开启动画跑完之前会**忽略**这一按(实测:点图后 150ms 内按返回,那颗关闭键
+     就在 367,0 44x44、visible 且 pointer-events:auto,按下去什么都不发生)。而原生
+     那一按已经被消费掉了,不会再有人按第二次 —— 所以按完自己盯一会儿。
+     这张表是**相邻两次之间的间隔**(累计 0/120/320/600/1000ms),每一轮只在"还开着"时
+     再排下一轮,关掉就断链;五轮都按不动才硬收(硬收会让站点以为还开着,是最后手段)。 */
+  var CLOSE_RETRY = [0, 120, 200, 280, 400];
+
   function closeGallery() {
-    var b = document.querySelector('.pswp__button--close');
-    if (b) { b.click(); return; }
     var p = document.querySelector('.pswp');
-    if (p) p.style.display = 'none';
+    if (!p) return;
+    var step = function (i) {
+      if (!pswpOpen()) return;
+      if (i >= CLOSE_RETRY.length) { p.style.display = 'none'; return; }
+      var b = document.querySelector('.pswp__button--close');
+      if (b) b.click();
+      setTimeout(function () { step(i + 1); }, CLOSE_RETRY[i]);
+    };
+    step(0);
   }
   /* 看图浮层不产生历史记录,原生返回回调开着它时要先关浮层,否则会直接跳出这一页 */
   window.__bwCloseGallery = closeGallery;
@@ -268,6 +285,28 @@
   /* .pswp 那颗节点是常驻的(收起只是 display:none),所以盯它自己:
      class/style 一变就同步一次状态,不等 refresh 的 250ms 防抖。 */
   var pswpObs = null, galleryWasOpen = null, obsLayer = null;
+
+  /* 关图之后正文被甩回顶部(用户报)。在开/关这条边沿上记账:开图时记住读到哪、
+     在哪一页,关图时若文档确实回到了顶部而开图前不在顶部,就搬回去。
+     ① 只在"确实跳了顶"时出手 —— 站点自己滚去别处(比如定位到被点的那条评论)不抢方向盘;
+     ② 路由变了就不搬:那是真离开了这一页,搬回去会把人按回一条已经不存在的深处;
+     ③ 站点关图后还要重排几百毫秒,一次写会被它盖掉,所以分几个时刻补写,
+        每次先看现在是不是还在顶部 —— 已经落位就自然停手。判据用"仍在顶部"这个
+        电平而不是"我们写过":自己写回又自己读的属性,拿写没写过当守卫不可靠。 */
+  var gallerySavedY = 0, gallerySavedPath = '', galleryClosedByPop = false;
+
+  function restoreAfterGallery() {
+    var want = gallerySavedY, path = gallerySavedPath;
+    if (want <= 4 || path !== location.pathname) return;
+    [0, 120, 320, 600, 1000].forEach(function (t) {
+      setTimeout(function () {
+        if (pswpOpen() || location.pathname !== path) return;
+        if ((window.pageYOffset || 0) > 4) return;
+        window.scrollTo(0, want);
+      }, t);
+    });
+  }
+
   function syncGalleryOverlay() {
     var open = pswpOpen();
     /* 只在真的换态时过一趟 JS→Java 桥:原来每次调用都无条件报一遍,
@@ -277,6 +316,12 @@
       if (window.BwNative && window.BwNative.setGalleryOpen) {
         try { window.BwNative.setGalleryOpen(open); } catch (e) { /* ignore */ }
       }
+      if (open) {
+        /* 开图前读到哪,记下来给关图那头对照(见 restoreAfterGallery) */
+        gallerySavedY = window.pageYOffset || 0;
+        gallerySavedPath = location.pathname;
+        galleryClosedByPop = false;
+      }
       /* 收起的那一刻补排:浮层开着时 layoutMasonry 直接 return(见那里的守卫),
          关掉的瞬间信息流要回到接管态。站点自己的收合动画还要跑几百毫秒,
          期间它写的仍是单列口径的行位,所以过后再补一次,别停在半程状态。
@@ -284,6 +329,7 @@
       if (!open) {
         try { masonry(); } catch (e) { /* ignore */ }
         setTimeout(function () { try { masonry(); } catch (e) { /* ignore */ } }, 420);
+        restoreAfterGallery();
       }
     }
     var p = document.querySelector('.pswp');
@@ -329,6 +375,41 @@
     } else if (!want && chip) {
       chip.remove();
     }
+  }
+
+  /* 未读角标:站点把数字写在顶栏消息入口里的 .m-bubble 上,而 theme.js 把
+     `.lite-topbar .lite-iconf-msg` 整颗收掉了 —— 数字跟着一起看不见(红点同理)。
+     这里不另算未读数,只把站点那颗 em 的状态搬到我们的消息项上,清未读仍走站点。
+     判据必须读**内联 style**:父盒被我们 display:none 之后,子节点的 computed
+     display 恒为 none,拿 computed 当守卫等于永远判成"没有未读"。 */
+  var badgeSrc = null, badgeObs = null;
+
+  function syncMsgBadge() {
+    var b = document.querySelector('#bw-nav .bw-badge');
+    if (!b) return;
+    var src = document.querySelector('.lite-iconf-msg .m-bubble');
+    if (src !== badgeSrc) {
+      badgeSrc = src;
+      if (badgeObs) { try { badgeObs.disconnect(); } catch (e) { /* ignore */ } badgeObs = null; }
+      /* 站点改这个数字只动 em 的 style 与文本,不惊动 refresh 的 childList 观察器,
+         所以自己盯住它;节点被 Vue 换人时上面那段会重新挂。 */
+      if (src && window.MutationObserver) {
+        try {
+          badgeObs = new MutationObserver(function () { syncMsgBadge(); });
+          badgeObs.observe(src, {attributes: true, attributeFilter: ['style', 'class'],
+            characterData: true, childList: true, subtree: true});
+        } catch (e) { badgeObs = null; }
+      }
+    }
+    var on = !!src && src.style.display !== 'none';
+    if (!src) {
+      /* 站点只在首页那条顶栏里放消息入口(实测 /messages、/mine 上都没有这颗节点),
+         源不在不等于没有未读 —— 保持上一次镜像到的数字,回到首页自然再对齐。
+         判成"清空"会让角标在三个 tab 上无故消失。 */
+      return;
+    }
+    var txt = on ? (src.textContent || '').trim() : '';
+    if (b.textContent !== txt) b.textContent = txt;
   }
 
   /* 编辑卡按规则铺到功能区上方之后,卡里有一大块是空白,而站点只在 textarea 那一小截
@@ -415,6 +496,17 @@
 
   var lastHomeTap = 0;
 
+  /* 未登录点"我的"要去登录页。不能自己 location.href 到 passport:实测带着访客 SUB
+     过去会被当场 302 回 m.weibo.cn/(登录界面根本停不住),必须走原生那条先清 Cookie
+     再 loadUrl(LOGIN_URL) 的路(见 MainActivity#redirectToLogin)。 */
+  function goLogin() {
+    if (window.BwNative && window.BwNative.requestLogin) {
+      window.BwNative.requestLogin();
+      return;
+    }
+    if (window.BwNative && window.BwNative.toast) window.BwNative.toast('请先登录微博');
+  }
+
   /* 刷新反馈:让首页那颗图标与环接力(动画本体在 theme.js 的 .bw-refreshing 那组)。
      只在这一支调用 —— 回顶那一支有滚动当反馈,不该再动。
      重触发必须"摘类 → 强制回流 → 加类":只加类名时浏览器认为动画已经在跑,
@@ -473,6 +565,11 @@
       return;
     }
     var map = {search: '.nav-search', msg: '.lite-iconf-msg', me: '.lite-iconf-profile'};
+    /* 已知未登录就别去代理站点那颗入口了(实测未登录时它压根没渲染,代理到别处也是白点) */
+    if (k === 'me' && cfg && !cfg.uid) {
+      goLogin();
+      return;
+    }
     var target = document.querySelector(map[k]);
     if (target) {
       target.click();
@@ -491,7 +588,11 @@
       var url = profileUrl(c);
       if (url) {
         location.href = url;
+      } else if (c) {
+        /* 查到了、确实没登录 */
+        goLogin();
       } else if (window.BwNative && window.BwNative.toast) {
+        /* 没查到(/api/config 请求失败):不能当成未登录把人踢出去清 Cookie */
         window.BwNative.toast('请先登录微博');
       }
     });
@@ -952,7 +1053,100 @@
   function syncEditorClass() {
     var open = !!(edTarget && edTarget.querySelector('textarea'));
     document.documentElement.classList.toggle('bw-editor-open', open);
+    syncPanelGesture();
   }
+  /* 表情面板的视口矩形报给原生:setPanelGesture 把这块从系统返回手势里排除。
+     面板左缘距屏幕边只有 ~6dp,起手偏左的右滑会被手势导航的返回区截胡 ——
+     轻则 touchcancel 冻结翻页,重则整页被返回掉(2026-10-07 实测)。
+     JS 侧按矩形字符串去重,原生侧再做一层等值判断;正文页走 edObs 的批次,
+     撰写页没有 .lite-page-editor,由主观察器和 resize 兜着报。 */
+  var lastPanelRect = '';
+  /* 翻页的两处收尾修补(2026-10-07 用户报"左拉顺、右拉总会卡一下")
+     1) 判定:站点 onPanEnd 用「均速>5px每事件 / >0.5页宽 / >150px」,第一条在 60Hz
+        触点采样下几乎打不到,此前只把右拉放宽到 0.3 页宽 —— 于是同一把力度右拉翻页、
+        左拉被弹回,两向本来就不是一个手感。
+        这里两向同档:行程过 0.3 页宽,或松手速度过 0.25px/ms 的轻甩(且走了 >24px)。
+     2) 时长:站点收场固定 200ms ease。放宽阈值带来一把"慢拉一点点就松手"的翻页,
+        这时还剩 0.7 页宽要在 200ms 里走完 —— 逐帧实测末速 4px/帧、松手后 48.6px/帧,
+        内容比手指快十倍以上,看着就是顿一下再窜过去(同一段左拉因末速本就快,
+        接力比 1.3 倍,读起来是顺的)。时长按「剩余行程 / max(松手速度,0.9px每ms)」给,
+        夹在 200~460ms —— 也就是给收尾的平均速度封个顶:窄面板这一档约 290ms,
+        宽面板约 460ms,快甩仍落到 200ms 与原样一致。
+        代价:站点在收尾动画里用 transiting 挡住"点表情"(怕点中正在动的格子),
+        这一档从固定 200ms 变长到最长 460ms(窄面板那一把实测 288ms:松手后 200ms
+        内点不进,300ms 起正常)。 */
+  function patchRelease(vm) {
+    if (vm.__bwRel || typeof vm.onPanEnd !== 'function') return;
+    vm.__bwRel = true;
+    var relDur = 0, until = 0;
+    /* 只在"这一把翻页"的窗口里改时长;过点自动失效,免得下次点分类 tab
+       的归位动画也被带成 460ms */
+    function setRel(n) {
+      relDur = n;
+      until = n ? performance.now() + n + 60 : 0;
+    }
+    var origEnd = vm.onPanEnd;
+    vm.onPanEnd = function (t) {
+      var i0 = vm.pageIndex;
+      var d = (t && t.deltaX) || 0;
+      var dist = Math.abs(d);
+      /* velocityX:Hammer 按最后两拍算的瞬时速度(px/ms),正是松手那一刻的手速 */
+      var v = Math.abs((t && t.velocityX) || 0);
+      var w = vm.pageWidth || 0;
+      var flip = w > 0 && dist > w * 0.3;
+      if (!flip && v > 0.25 && dist > 24) flip = true;
+      setRel(0);
+      origEnd.call(vm, t);
+      if (flip && vm.pageIndex === i0) {
+        try { if (d < 0) { vm.goNext(); } else { vm.goPrev(); } } catch (e) { /* ignore */ }
+      }
+      if (w > 0 && vm.pageIndex !== i0) {
+        var ms = Math.round((w - dist) / Math.max(v, 0.9));
+        setRel(ms < 200 ? 200 : (ms > 460 ? 460 : ms));
+      }
+    };
+    /* 站点在 render 里按 calcTransitionDuration 写每页的 transition-duration,
+       只能挂在它上面才能和 transform 同一次 DOM 更新落地 —— 补丁写完再改
+       transition-duration 会打断已经在跑的 transition。 */
+    var origDur = vm.calcTransitionDuration;
+    vm.calcTransitionDuration = function (p) {
+      var s = origDur.call(vm, p);
+      return (s === '200ms' && relDur && performance.now() < until) ? relDur + 'ms' : s;
+    };
+  }
+  function syncPanelGesture() {
+    try {
+      if (!(window.BwNative && BwNative.setPanelGesture)) return;
+      var g = document.querySelector('#app .emotionGroups');
+      if (g) {
+        var ta = g.querySelector('.touchArea');
+        var v = ta && ta.__vue__;
+        for (var i = 0; v && i < 4; i++) {
+          if (typeof v.onPanEnd === 'function' && v.emotionPages) { patchRelease(v); break; }
+          v = v.$parent;
+        }
+      }
+      var key = '';
+      if (g) {
+        var r = g.getBoundingClientRect();
+        if (r.width > 10 && r.height > 10) {
+          key = [Math.round(r.left), Math.round(r.top),
+                 Math.round(r.width), Math.round(r.height)].join(',');
+        }
+      }
+      if (key === lastPanelRect) return;
+      lastPanelRect = key;
+      if (key) {
+        var a = key.split(',');
+        BwNative.setPanelGesture(+a[0], +a[1], +a[2], +a[3]);
+      } else {
+        BwNative.setPanelGesture(0, 0, 0, 0);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  try {
+    window.addEventListener('resize', syncPanelGesture, true);
+  } catch (e) { /* ignore */ }
   function watchEditor() {
     var ed = document.querySelector('.lite-page-editor');
     if (ed === edTarget) return;
@@ -2096,7 +2290,7 @@
        refresh()(滚动事件 + 250ms 防抖)上,而排布跑在 MutationObserver 的微任务里
        —— 新卡先按"还没裁剪"的高度被量到、写上行位,~84ms 后裁剪才落地,卡片一矮,
        同列下方的卡片被 shift 整体顶上去 134~267px,用户看到的就是"滑动时上下乱跳"。
-       实测(.rundata/nine_race2.py):新卡插入瞬间 row=8729/span 399,84ms 后变成
+       逐帧实测:新卡插入瞬间 row=8729/span 399,84ms 后变成
        span 333 —— 卡片顶没动、高矮了 134px,整列下方跟着挪。
        放到最前面,量到的就是终态高度;clampNineGrid 自身幂等,重复调用无副作用。 */
     try { clampNineGrid(); } catch (e) { /* ignore */ }
@@ -2487,6 +2681,96 @@
     } catch (e) { /* ignore */ }
   }
 
+  /* ---- 搜索/热搜条目页返回时的"内容锚点"复位 ----
+     这两页从正文返回时站点把整列重建:实测返回那一帧文档高只有 1132,几百毫秒里长回 8056。
+     浏览器"把滚动恢复回来"这件事落在文档还短的时候,位置被夹住;之后内容一批批长回来 ——
+     用户看到的就是页面上下乱跳(实测盯住的那张卡在视口里 64 → 180 → -1118,
+     反向 1 次、累计 1414px;另有单帧 143px、248px 的几档)。
+     所以不跟它比谁滚得对,改按**内容**复位:离开前记下"视口正中那张卡是谁、它贴在视口哪里",
+     回到这一页后在重建这段时间里不断把那张卡搬回原位,连续几拍都对上了就收手。
+     只管 /search:首页那条流另有窗口化记账(见 refCard / placeMem),不在这儿插手。 */
+  var LIST_PATH = '/search';
+  var listAnchor = null, anchorFrozen = null, anchorRun = 0, anchorActive = false;
+
+  function isListRoute(p) { return p.indexOf(LIST_PATH) === 0; }
+
+  /* 这一页的"身份"。整条 location.search 不能用:站点在里面塞了 extparam
+     (含 display_time、pre_seqid、内网 IP 这些一次一个样),进出这一页时它会被改写,
+     拿整串当 key 就永远对不上、复位静默不生效。只取列表本身的两个参数。 */
+  function listKey() {
+    var m = /[?&]containerid=([^&]*)/.exec(location.search);
+    var q = /[?&]q=([^&]*)/.exec(location.search);
+    return location.pathname + '|' + (m ? m[1] : '') + '|' + (q ? q[1] : '');
+  }
+
+  function cardIdOf(el) {
+    var n = el, v = null;
+    while (n && !v) { v = n.__vue__; n = n.parentElement; }
+    var it = v && (v.item || v.mblog);
+    var k = it && (it.id || it.mid);
+    return k ? String(k) : null;
+  }
+
+  function noteListAnchor() {
+    /* anchorFrozen 期间不记:返回这一趟列表是从空文档重建的,第一拍往往只挂上一两张卡,
+       那时扫到的"正中那张"根本不是用户离开时看的那张(实测 off 从 290 被冲成 44,
+       复位照着 44 对齐,人看到的就是"位置不对")。 */
+    if (anchorActive || anchorFrozen || location.pathname.indexOf(LIST_PATH) !== 0) return;
+    var y = window.pageYOffset || 0;
+    // 只在真的滚开一段之后才重记:省掉每帧扫一遍卡片盒
+    if (listAnchor && Math.abs(y - listAnchor.y) < 160) return;
+    var cards = document.querySelectorAll('.card9');
+    var mid = window.innerHeight / 2, best = null;
+    for (var i = 0; i < cards.length; i++) {
+      var r = cards[i].getBoundingClientRect();
+      if (r.height < 40) continue;
+      var id = cardIdOf(cards[i]);
+      if (!id) continue;
+      var d = Math.abs(r.top + r.height / 2 - mid);
+      if (!best || d < best.d) best = {d: d, id: id, off: Math.round(r.top)};
+    }
+    if (best) listAnchor = {key: listKey(), id: best.id, off: best.off, y: y};
+  }
+
+  function restoreListAnchor() {
+    var a = anchorFrozen || listAnchor;
+    if (location.pathname.indexOf(LIST_PATH) !== 0) return;
+    if (!a || a.key !== listKey()) { anchorFrozen = null; return; }
+    var run = ++anchorRun;
+    var deadline = Date.now() + 3000, still = 0, lastH = -1;
+    anchorActive = true;
+    var find = function () {
+      var cs = document.querySelectorAll('.card9');
+      for (var i = 0; i < cs.length; i++) if (cardIdOf(cs[i]) === a.id) return cs[i];
+      return null;
+    };
+    var stop = function () {
+      if (run !== anchorRun) return;
+      anchorActive = false;
+      anchorFrozen = null;
+    };
+    var step = function () {
+      if (run !== anchorRun) return;                    // 被新一轮/用户接手顶掉了
+      if (Date.now() > deadline) { stop(); return; }
+      var el = find();
+      if (!el) { setTimeout(step, 90); return; }        // 那一页还没重建到这张卡
+      var delta = Math.round(el.getBoundingClientRect().top - a.off);
+      if (Math.abs(delta) > 6) {
+        window.scrollBy(0, delta);
+        still = 0;
+      } else {
+        /* 对上还要看文档高稳不稳:重建那几百毫秒里图片陆续解码完成,
+           内容会被再推一次(实测刚对齐就又被推走 266px)。两样都稳三拍才收手。 */
+        var h = document.documentElement.scrollHeight;
+        if (h === lastH) still++; else still = 0;
+        lastH = h;
+        if (still >= 3) { stop(); return; }
+      }
+      setTimeout(step, 90);
+    };
+    step();
+  }
+
   function refresh() {
     try {
       var p = location.pathname;
@@ -2563,6 +2847,8 @@
       placeComposeAvatar();
       allowComposeThumbnails();
       syncGalleryOverlay();
+      syncMsgBadge();
+      noteListAnchor();
       clampNineGrid();
       /* 悬浮导航与发博按钮只在四个主 tab 出现,其余一律收掉:
          正文页 / 私信会话(那条输入框在常规流里,胶囊压上去实测重叠 388x39) / 撰写 /
@@ -2609,6 +2895,11 @@
   function routeChanged() {
     var now = location.pathname + location.search;
     if (now === lastRoute) return false;
+    /* 离开列表页那一刻把锚点冻住:回来后重建期间它不能被"当下扫到的那张卡"改写
+       (见 noteListAnchor 的 anchorFrozen 那条注释) */
+    if (isListRoute(lastRoute) && !isListRoute(location.pathname)) {
+      anchorFrozen = listAnchor ? {key: listAnchor.key, id: listAnchor.id, off: listAnchor.off} : null;
+    }
     lastRoute = now;
     return true;
   }
@@ -2619,12 +2910,24 @@
     window.addEventListener('popstate', function () {
       /* 浏览器/系统返回不一定伴随 DOM 变异,路由变化也立刻同步一次 */
       syncRouteClasses();
+      /* 原生那一按可能赶在开关态过桥之前(浮层已经开了、原生还判着"没开"),于是这一按
+         被当成页面后退吃掉。看图器会把 #&gid=… 写到地址上,历史一弹就该它关 ——
+         站点那条自己关的路子并不总接得住,这里补一刀。一次开图只补一刀:
+         站点收合时自己还要再弹一次历史,跟着补第二刀就把人退回上一页了。 */
+      if (pswpOpen() && !galleryClosedByPop) {
+        galleryClosedByPop = true;
+        closeGallery();
+      }
       if (routeChanged()) {
         if (timer) { clearTimeout(timer); timer = null; }
         build();
         refresh();
+        restoreListAnchor();
       }
     }, {passive: true});
+    /* 用户自己动了手就别再抢:复位那条链一拍内作废 */
+    document.addEventListener('touchstart', function () { anchorRun++; anchorActive = false; },
+      {passive: true, capture: true});
     new MutationObserver(function () {
       /* 快路径:宽屏下信息流容器一出现(或被整换)就立刻挂专守,
          不等 schedule 的 250ms 节流;挂上时 layoutMasonry 同步排首批。
@@ -2633,13 +2936,120 @@
         try { watchFeed(); } catch (e) { /* ignore */ }
       }
       syncRouteClasses();
+      syncPanelGesture();
       if (routeChanged()) {
         if (timer) { clearTimeout(timer); timer = null; }
-        try { build(); refresh(); } catch (e) { /* ignore */ }
+        try { build(); refresh(); restoreListAnchor(); } catch (e) { /* ignore */ }
       }
       schedule();
     }).observe(document.documentElement, {
       childList: true, subtree: true
     });
   } catch (e) { /* ignore */ }
+})();
+
+/* ===== 表情面板卡死守卫(2026-10-07 用户报"经常翻一半 + 驻留") =====
+   站点翻页是 v-touch 的 pan/panend 驱动的:onPan 逐事件写 deltaX,onPanEnd
+   按阈值 goNext/goPrev 或弹回 —— 两条路都落在整页位(0/±pageWidth)。
+   但 panend 依赖 touchend/touchcancel 送达;这串事件一旦丢(手指划出面板/
+   窗口、系统手势截胡、合成触摸序列不完整),dragging 悬着、页面就冻在
+   任意 offsetX —— 实测手机 -195/+184(dragging=true 悬着)、平板 -477
+   (cur=true,229px 探进面板内),就是"翻一半"和边缘叠印驻留。
+   这里在触摸收尾后校验一次:live 页的 deltaX 必须是 0/±pageWidth,否则照站点
+   onPanEnd 的两条路收尾 —— 拖过 0.3 页宽就补 goNext/goPrev,不到则把当前页滑回 0、
+   邻页滑回屏外(不用站点的 init() 归位:它把全页 cur 一起撤掉,半露在面板里的邻页会
+   一瞬间消失)。touchend 后 250ms(那一把的 panend 会自己收尾,等它),
+   touchcancel 后 16ms(Hammer 收到 cancel 不给 panend,等它就是冻住)。
+   拖动中(屏上有触摸)不判,避免打断正常手势;状态本已合法时这里等价于无操作。
+   收尾事件整个没送达(连 cancel 都没有)时 dragging 会一直悬着,那种情况下一次
+   单指起手先结算上一把,免得这一把的跟手位移叠在半路的旧位移上。 */
+(function () {
+  if (window.__bwEmoGuard) return;
+  window.__bwEmoGuard = true;
+  var timer = null;
+  function emoVM() {
+    var ta = document.querySelector('#app .emotionGroups .touchArea');
+    var v = ta && ta.__vue__;
+    for (var i = 0; v && i < 4; i++) {
+      if (typeof v.init === 'function' && v.emotionPages) return v;
+      v = v.$parent;
+    }
+    return null;
+  }
+  function check() {
+    timer = null;
+    var v;
+    try { v = emoVM(); } catch (e) { return; }
+    if (!v || !v.emotionPages || !v.emotionPages.length) return;
+    if (v.dragging) v.dragging = false;   /* 指已离而 dragging 悬着:收尾丢了 */
+    var w = v.pageWidth || 0;
+    var stuck = v.emotionPages.some(function (p) {
+      return p.cur && Math.abs(p.deltaX) > 1 && Math.abs(Math.abs(p.deltaX) - w) > 1;
+    });
+    if (!stuck) return;
+    /* 拖过 0.3 页宽的手势补完成,不到则回弹 —— 与 patchRelease 的判定同档。
+       快速右甩常把手甩出窗口/被系统中途收走,touchend 丢给不出 panend,页面冻在
+       60%~80% 处;这时补上 goNext/goPrev,体感就是"这一把成功了"。 */
+    var cur = v.emotionPages[v.pageIndex];
+    var d = cur ? cur.deltaX : 0;
+    try {
+      if (w && Math.abs(d) > w * 0.3) {
+        if (d < 0) v.goNext(); else v.goPrev();
+      } else if (cur) {
+        /* 回弹走站点 onPanEnd 弹回那一档的写法:邻页留着 cur 一起滑回屏外。
+           站点自己的 init() 会把半露在面板里的邻页一瞬间 display:none —— 在"拖到
+           一半被收走"的现场,那就是半张表情图当场消失,比滑走跳眼。 */
+        cur.deltaX = 0;
+        var nb = v.emotionPages[d < 0 ? v.nextIndex : v.prevIndex];
+        if (nb && w) { nb.cur = true; nb.deltaX = d < 0 ? w : -w; }
+      }
+      /* 两种收尾都把更早遗留的非法页一并收掉(多次截胡可能叠了好几个) */
+      v.emotionPages.forEach(function (p) {
+        if (p.cur && Math.abs(p.deltaX) > 1 && Math.abs(Math.abs(p.deltaX) - w) > 1) {
+          p.cur = false;
+          p.deltaX = 0;
+        }
+      });
+    } catch (e) { /* ignore */ }
+  }
+  function schedule(ms) {
+    if (timer) return;
+    timer = setTimeout(check, ms);
+  }
+  function abort(e) {
+    /* 有未决检查 = 上一把已经收尾(手指确已离屏),只是这一把起手早于检查时刻。
+       这种时候不能只把检查丢掉:上一把的 panend 要是被系统收走丢了,页面就停在
+       半路,这一把第一个 pan 会把当前页从"半路"直接写成新的 deltaX —— 先弹回再跟手,
+       而 pageIndex 没前进,就是用户报的"连续快速右拉翻不动"(2026-10-07)。
+       起手先把上一把结算掉;状态本就合法时 check() 什么都不做。 */
+    if (timer) { check(); return; }
+    /* 没有未决检查,但站点的 dragging 还挂着:这一把的收尾事件整个没送达
+       (手势截胡在部分 ROM 上连 touchcancel 都不补)。只有单指起手才结算 ——
+       两根手指的 touchstart 说明别人正在拖,那绝不能碰。
+       这里读 dragging 是安全的:本监听在 document 的捕获阶段,站点自己的
+       触摸处理挂在面板元素上,要到 target 阶段才跑,此刻它还属于上一把。 */
+    if (e && e.touches && e.touches.length > 1) return;
+    var v;
+    try { v = emoVM(); } catch (err) { return; }
+    if (v && v.dragging) check();
+  }
+  /* cancel 那一档要立刻收尾:实测 Hammer 收到 touchcancel 不给 panend(合成的
+     "拖到一半被收走"里只有 init 补刀那一条调用),手指已经确定不在屏上了,再等
+     250ms 就是"页面冻在你拉到的位置上顿一下"—— 右拉起手贴着左侧返回区,最容易被
+     系统收走,所以只有右拉能感到"总会卡一下"(2026-10-07 实测:冻结 252ms)。
+     end/pointerup 仍走延迟:那一把 panend 会在同一轮事件派发里跑完,模型先落地。 */
+  [['touchend', 250], ['pointerup', 250], ['touchcancel', 16], ['pointercancel', 16]]
+    .forEach(function (ev) {
+      document.addEventListener(ev[0], function (e) {
+        /* 多指拖动:还有手指按着就不排检查,等最后一根抬起 */
+        if (e && e.touches && e.touches.length > 0) return;
+        schedule(ev[1]);
+      }, true);
+    });
+  document.addEventListener('touchstart', abort, true);
+  /* pointerdown 里没有 touches 可用来分辨第几根手指,只走"有未决检查就结算"这一档,
+     免得第二指的 pointerdown 把别人正在拖的手势判成遗留 */
+  document.addEventListener('pointerdown', function () {
+    if (timer) check();
+  }, true);
 })();
