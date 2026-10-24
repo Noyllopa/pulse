@@ -284,7 +284,7 @@
 
   /* .pswp 那颗节点是常驻的(收起只是 display:none),所以盯它自己:
      class/style 一变就同步一次状态,不等 refresh 的 250ms 防抖。 */
-  var pswpObs = null, galleryWasOpen = null, obsLayer = null;
+  var pswpObs = null, pswpEl = null, galleryWasOpen = null, obsLayer = null;
 
   /* 关图之后正文被甩回顶部(用户报)。在开/关这条边沿上记账:开图时记住读到哪、
      在哪一页,关图时若文档确实回到了顶部而开图前不在顶部,就搬回去。
@@ -335,7 +335,16 @@
     var p = document.querySelector('.pswp');
     if (!p) {
       if (pswpObs) { try { pswpObs.disconnect(); } catch (e) { /* ignore */ } pswpObs = null; }
+      pswpEl = null;
+      obsLayer = null;
       return;
+    }
+    /* 换页时 .pswp 会被整颗换掉(SPA 重建),而旧节点仍在文档外——继续观察它等于
+       永远看不到新浮层的开合。节点换了就重挂,顺带把视频层那颗引用一起清掉。 */
+    if (pswpObs && p !== pswpEl) {
+      try { pswpObs.disconnect(); } catch (e) { /* ignore */ }
+      pswpObs = null;
+      obsLayer = null;
     }
     if (!pswpObs) {
       try {
@@ -350,7 +359,8 @@
            实测一次拖动手势里观察器进 60 次、每次一趟强制重排;漏掉的态还有
            refresh()(滚动 + 250ms 调度)兜着。 */
         pswpObs.observe(p, {attributes: true, attributeFilter: ['class', 'style']});
-      } catch (e) { pswpObs = null; }
+        pswpEl = p;
+      } catch (e) { pswpObs = null; pswpEl = null; }
     }
     /* 全屏视频层同样只把开关态写在 class/style 上，一起盯；它是常驻节点，
        第一次进来才挂上(挂过就不重复 observe 同一个元素) */
@@ -387,7 +397,8 @@
   function syncMsgBadge() {
     var b = document.querySelector('#bw-nav .bw-badge');
     if (!b) return;
-    var src = document.querySelector('.lite-iconf-msg .m-bubble');
+    var entry = document.querySelector('.lite-iconf-msg');
+    var src = entry ? entry.querySelector('.m-bubble') : null;
     if (src !== badgeSrc) {
       badgeSrc = src;
       if (badgeObs) { try { badgeObs.disconnect(); } catch (e) { /* ignore */ } badgeObs = null; }
@@ -401,13 +412,19 @@
         } catch (e) { badgeObs = null; }
       }
     }
-    var on = !!src && src.style.display !== 'none';
-    if (!src) {
+    if (!entry) {
       /* 站点只在首页那条顶栏里放消息入口(实测 /messages、/mine 上都没有这颗节点),
          源不在不等于没有未读 —— 保持上一次镜像到的数字,回到首页自然再对齐。
          判成"清空"会让角标在三个 tab 上无故消失。 */
       return;
     }
+    /* 入口还在、角标节点没了 = 未读已清空(读完消息后站点会摘掉 em)。
+       只认入口不认 em,否则清空那一刻数字会一直挂在导航栏上。 */
+    if (!src) {
+      if (b.textContent) b.textContent = '';
+      return;
+    }
+    var on = src.style.display !== 'none';
     var txt = on ? (src.textContent || '').trim() : '';
     if (b.textContent !== txt) b.textContent = txt;
   }
@@ -522,7 +539,7 @@
   function act(k) {
     if (k === 'home') {
       var p = location.pathname;
-      if (p === '/' || p === '/index' || p === '') {
+      if (/^\/(index(\.html)?)?$/.test(p)) {
         var y = window.pageYOffset || 0;
         var btn = document.querySelector('.refresh-btn');
         /* 回顶一律走站点自己的控件(.refresh-btn 被 theme.js 收掉了但仍可程序化点击),
@@ -604,30 +621,33 @@
   var lastY = -1;
   var scrollHide = false;
 
-  /* 正文页(/status|/detail|/comments|/attitudes)的返回球与评论条有另一个阈值:
+  /* 正文页(/status|/detail|/comments|/attitudes)的评论条有另一个阈值:
      2026-09-26 按需求"下滑到差不多返回按钮遮挡头像时就隐藏返回按钮与评论框,
-     上滑显示逻辑不变"。
+     上滑显示逻辑不变";2026-10-24 手机档的返回钮改为页面内文档定位、随页面滚走
+     (见 theme.js 的 max-width:767px 段),不再压头像,这条阈值只剩评论条
+     在用。按同一需求"评论框逻辑不变",数值原样保留。
 
-     遮挡怎么算:返回球是 fixed、钉在 top:14 + --bw-topbar-pad(手机 16px)= y 14..54;
+     40 的来历(固定版返回球):球钉在 top:14 + --bw-topbar-pad(手机 16px)= y 14..54;
      作者头像(正文卡里第一枚 .m-img-box img)刚进页面时文档 y≈79、高 32
      —— 也就是 scrollY≈25 时球的下沿(54)就切到头像的上沿(79)。
-     球只要再往下压一点就开始糊住头像,所以阈值取"球压到头像一半"那一点:
+     球再往下压一点就开始糊住头像,所以取"球压到头像一半"那一点:
        avatarTop(79) + 半高(16) - ballBottom(54) ≈ 41 → 取 40。
-     站点各帖版的头部高度不完全一致(有的带来源/关注按钮),所以不写死 40,
-     改成**按当前这帖的头像实测**;量不到头像时退回 40。 */
+     球改成随页滚走后,它在 scrollY=54 离屏,与 40 仍在同一档,评论条收放的
+     时机观感不变。站点各帖版的头部高度不完全一致(有的带来源/关注按钮),
+     所以不写死 40,改成**按当前这帖的头像实测**;量不到头像时退回 40。 */
   var DEEP_HIDE_FALLBACK = 40;
   function deepHideAt() {
-    /* 平板不参与:content 带从 x=100 起、返回球在 x=14..54,两者本就不重叠,
-       theme.js 里 .bw-scroll-hide 的位移也只写在 max-width:767px 档。
-       这里直接给一个大到不会触发的值,让平板的收起状态与改动前一致。 */
+    /* 平板不参与收起:悬浮导航/操作栏本来就不在内容列上;评论条本身也只在
+       手机档有"压在评论列表上"的问题。这里给一个大到不会触发的值,让平板的
+       收起状态与改动前一致。 */
     if (window.matchMedia('(min-width: 768px)').matches) return SCROLL_HIDE_AT;
     var img = document.querySelector('.lite-page-wrap .m-img-box img');
     if (!img) return DEEP_HIDE_FALLBACK;
     var r = img.getBoundingClientRect();
     if (!r.height) return DEEP_HIDE_FALLBACK;
-    var ballBottom = 54;                       // 返回球下沿(14 + 40)
+    var ballBottom = 54;                       // 固定版返回球下沿(14 + 40),只用于这条阈值
     var docTop = r.top + (window.pageYOffset || 0);
-    // 头像未被滚走时:滚到"球压住头像中部"才算遮住(实测 79 + 32/2 - 54 = 41)
+    // 头像未被滚走时:滚到"旧返回球压住头像中部"才算遮住(实测 79 + 32/2 - 54 = 41)
     return Math.max(12, Math.round(docTop + r.height / 2 - ballBottom));
   }
 
@@ -758,10 +778,16 @@
     if (ov === ovWasOpen) return;
     ovWasOpen = ov;
     syncOverlayChrome(ov);
+    /* 返回球/操作条/设置入口的显隐也跟着浮层走:它们不在 syncOverlayChrome 的
+       管辖里(那边只管导航栏、发博球、刷新球),只靠 refresh 补的话,浮层换态
+       若没伴随 DOM 增删,这几颗就停在上一态(实测关图后返回球还压在信息流上)。
+       显隐判据在 syncFloatChrome 内部重算,这里只把当前 deep/hidden 传进去。 */
+    syncFloatChrome(document.documentElement.classList.contains('bw-deep'), lastHidden);
     /* 收起这一头沿用看图器收合动画的时长再补一次：动画期间尺寸还是满屏 */
     if (!ov) {
       setTimeout(function () {
         syncOverlayChrome(overlayOpen());
+        syncFloatChrome(document.documentElement.classList.contains('bw-deep'), lastHidden);
         syncMediaBars();
       }, 420);
     }
@@ -889,11 +915,14 @@
      - 热搜条目页路由也是 /search,但带 q(落地页 containerid=231583 不带),据此区分;
        站点把参数整体编码过,所以 `q%3D` 也要认(实测 `%26q%3D%E4…`)。
      - /message 是主 tab,/message/chat 是会话页(底部输入框会被胶囊压住,实测重叠 388x39)。
-     - /profile、/u/ 是"我的"与主页,导航栏在这儿有实际落点,保留。 */
+     - /my、/profile 是"我的"页,导航栏在这儿有实际落点,保留。
+     - /u/<uid> 是他人主页,页底本来就有站点自己的操作栏(关注/私信),导航栏浮上来会压住它,
+       所以不列进来。旧正则里的 `u\/` 后面还跟着"必须再来一个 / 或结束",实际上从没匹配过 /u/<uid>;
+       这里按真实意图写清,行为不变。 */
   function isMainTab() {
     var p = location.pathname, s = location.search || '';
     if (/^\/(index\.html)?$/.test(p)) return true;
-    if (/^\/(my|u\/|profile)(\/|\?|$)/.test(p)) return true;
+    if (/^\/(my|profile)(\/|\?|$)/.test(p)) return true;
     if (/^\/message(\/|$)/.test(p) && p.indexOf('/message/chat') !== 0) return true;
     if (/^\/search/.test(p) && s.indexOf('q=') === -1 && s.indexOf('q%3D') === -1) return true;
     return false;
@@ -956,7 +985,7 @@
         var def = null;
         for (var i = 0; i < ACTS.length; i++) if (ACTS[i].k === item.getAttribute('data-k')) def = ACTS[i];
         if (!def) return;
-        var target = document.querySelector(def.sel);
+        var target = firstVisible(def.sel);
         if (target) { target.click(); return; }
         /* 评论框一展开,站点就把折叠那一排整排摘掉(换成 .composer-mini-wrap),
            转发/赞的目标节点临时不在 DOM 里 —— 直接返回就是"按了没反应"。
@@ -973,7 +1002,7 @@
         }
         if (!tapOutsideBody()) return;
         setTimeout(function () {
-          var el = document.querySelector(def.sel);
+          var el = firstVisible(def.sel);
           if (el) el.click();
         }, 0);
       });
@@ -1211,14 +1240,19 @@
     set.style.display = (!video && document.querySelector(SET_SEL)) ? 'flex' : 'none';
     // 手机端保留站点那条底栏(已改成横向悬浮),所以竖置操作栏只在平板出现
     acts.style.display = (wide && deep && !video && editor) ? 'flex' : 'none';
-    /* 读内容的页面(正文页 / 个人主页与博主主页 / 服务端直出的卡片页):左上返回球
-       一直压在正文上 —— 与首页那套悬浮件一样沿用上滑收起的锁存状态(下滑立刻放出)。
-       私信会话页不在名单里:那条页面唯一的出口就是这颗球,而且它本来也不滚。
-       评论框展开时不能收:那是人正在打字,收掉等于把输入框从他手里抽走。 */
+    /* 读内容的页面(个人主页与博主主页 / 服务端直出的卡片页):左上返回球与评论条
+       沿用上滑收起的锁存状态(下滑立刻放出)。私信会话页不在名单里:那条页面唯一的
+       出口就是这颗球,而且它本来也不滚。评论框展开时不能收:那是人正在打字,
+       收掉等于把输入框从他手里抽走。
+       正文页(deep)的返回钮在手机档不在这把锁里(2026-10-24 按需求"成为页面
+       一部分,随页面上滑而上滑,评论框逻辑不变"):theme.js 把它改成文档绝对定位,
+       随内容一起滚走,所以这里不再给它打 .bw-scroll-hide。平板仍保持固定返回球
+       (它本来就不遮挡内容,需求的结论是不用改)。评论条仍按 deepHideAt 原阈值
+       收放(2026-09-26 那条对评论条继续有效)。 */
     var hcls = document.documentElement.classList;
     var reading = deep || hcls.contains('bw-page-me') || hcls.contains('bw-cardpage');
     var chrome = hidden && reading && !hcls.contains('bw-editor-open');
-    fb.classList.toggle('bw-scroll-hide', chrome);
+    fb.classList.toggle('bw-scroll-hide', chrome && !deep);
     set.classList.toggle('bw-scroll-hide', chrome);
     if (editor) editor.classList.toggle('bw-scroll-hide', chrome);
     /* 卡片页(博主主页那一族)底部那条站点自己的操作栏(已关注/私信/热门)跟着同一把锁
@@ -1588,6 +1622,30 @@
      节拍间的视口冲刺由窗口头部余量(first_scroll≈4106px)与尾部余量(≈2900px)吸收。
      v-for 带 key,节拍提频只增量挂摘头尾几张卡。仅在宽屏接管期内生效(与 .hei 减半
      同进退,见 syncHeiUnits/unscaleHeiUnits),退出时还原原函数。 */
+  /** 站点"窗口向前推进 delta 位移"的那段账目,逐行照抄它自己的写法,抽出来给
+      泵和心跳共用。返回 true 表示这一拍真的动了。
+      注意站点自己的守卫是 `wb_list_top.length>0 && wb_list_bottom.length>0` ——
+      顶在文档底时按当前位移问它,拿到的常常是"只进不出"(实测 {top:2,bot:0}),
+      于是整块被跳过、窗口冻住,而文档已经滚不动了,再没有下一拍。 */
+  function applyMax(e, i) {
+    if (!i || typeof i !== 'object') return false;
+    if (!i.wb_list_top.length || !i.wb_list_bottom.length) return false;
+    var hTop = e.get_wb_hei(i.wb_list_top);
+    var hBot = e.get_wb_hei(i.wb_list_bottom);
+    e.padding_top += hTop;
+    e.padding_bottom = e.padding_bottom > hBot ? e.padding_bottom - hBot : 0;
+    e.list_cur = e.list_cur.slice(i.diff_wb_list.length).concat(i.add_wb_list);
+    e.max = e.list_cur[e.list_cur.length - 1].feed_id;
+    e.since = e.list_cur[0].feed_id;
+    e.last_scrolltop += hTop;
+    e.is_loading = false;
+    return true;
+  }
+
+  function advanceMax(e, delta) {
+    return applyMax(e, e.get_scroll_items(delta, 'max'));
+  }
+
   function pumpScrolling(vm) {
     /* 守卫用**函数身份**比对而不只看标记:实测存在 scrolling 被换回原函数而
        __bwPumped 标记残留的状态(多重注入实例的挂/卸交错),此时必须重新接管。
@@ -1620,17 +1678,7 @@
           if (Math.abs(a) >= e.get_item_H('start', 1)) {
             var i = e.get_scroll_items(a, 'max');
             if (i && typeof i === 'object') {
-              if (i.wb_list_top.length > 0 && i.wb_list_bottom.length > 0) {
-                e.padding_top += e.get_wb_hei(i.wb_list_top);
-                e.padding_bottom = e.padding_bottom > e.get_wb_hei(i.wb_list_bottom)
-                  ? e.padding_bottom - e.get_wb_hei(i.wb_list_bottom) : 0;
-                var c = e.list_cur.slice(i.diff_wb_list.length);
-                e.list_cur = c.concat(i.add_wb_list);
-                e.max = e.list_cur[e.list_cur.length - 1].feed_id;
-                e.since = e.list_cur[0].feed_id;
-                e.last_scrolltop += e.get_wb_hei(i.wb_list_top);
-                e.is_loading = false;
-              }
+              applyMax(e, i);
             } else if (e.nextPageApi) {
               /* 失败限流:网络失败时请求瞬断→catch→is_request 复位→下一拍(80ms)
                  又发 → 12.5 次/秒的失败风暴,甩动途中主线程被打满(用户报"卡死")。
@@ -1670,10 +1718,9 @@
     /* 站点若已把旧函数挂上 window.onscroll,换成泵;还是 null(尚未初始化)时不动,
        站点自己会在 init_first_data 里把(已被替换的)vm.scrolling 挂上去 */
     if (window.onscroll) window.onscroll = vm.scrolling;
-    /* 自愈不能只挂在滚动上:燃料见底时文档已经滚不动,也就再没有滚动事件。 */
-    if (!vm.__bwHealTimer) vm.__bwHealTimer = setInterval(function () {
-      healFeed(vm);
-    }, 2000);
+    /* 自愈不只挂在滚动上:燃料见底时文档已经滚不动,也就再没有滚动事件。
+       心跳是全页面一份(见 armFeedHeal),不随接管/退回来回挂。 */
+    armFeedHeal();
   }
 
   /** 与滚动无关的信息流自愈。两条都是"新的加载不出来"的死路:
@@ -1727,11 +1774,58 @@
 
   function unpumpScrolling(vm) {
     if (!vm.__bwPumped) return;
-    if (vm.__bwHealTimer) { clearInterval(vm.__bwHealTimer); vm.__bwHealTimer = null; }
     vm.scrolling = vm.__bwPumped;
     delete vm.__bwPumped;
     delete vm.__bwPumpFn;
     if (window.onscroll) window.onscroll = vm.scrolling;
+  }
+
+  /** 一份文档一个心跳。站点推进窗口只挂在滚动事件上,而"顶在文档底"正是
+      再没有滚动事件的那一刻 —— 手机单列不接管排布,原来连这道心跳都没有:
+      实测快甩把视口冲到文档底时,账上还有 12 条已加载未渲染的条目,窗口 `fi`
+      冻在 32 不动,连手动 load_more 把 list_all 从 60 灌到 79 都不渲染;
+      手动调一次站点自己的 scrolling() 立刻 fi 32→36、文档高 23327→26375。
+      所以这里在"确实顶到底"时补那一拍,落的还是站点自己那套账目(见 applyMax),
+      不另造一套窗口化。 */
+  function feedHealTick() {
+    try {
+      var wrap = document.querySelector('#app .main-wrap .pannelwrap');
+      if (!wrap) return;
+      var de = document.scrollingElement || document.body;
+      if (!de || de.scrollHeight - (de.scrollTop + (window.innerHeight || 0)) > 4) return;
+      var vm = findFeedVm(wrap);
+      if (!vm) return;
+      healFeed(vm);
+      /* 强制补拍只给手机单列:宽屏那侧泵 + 心跳本来就跑得动(实测同一段程序化
+         滚动 14 万像素里宽屏不停摆),多推一次反而多一次整窗重排。 */
+      if (WIDE.matches) return;
+      var cur = vm.list_cur, all = vm.list_all;
+      if (!cur || !cur.length || !all || !all.length ||
+          all.indexOf(cur[cur.length - 1]) >= all.length - 1 ||
+          typeof vm.get_scroll_items !== 'function' ||
+          typeof vm.get_wb_hei !== 'function' ||
+          typeof vm.get_item_H !== 'function') return;
+      /* 只在"这一拍窗口一格没动"时补 —— 正常推进时不插手,免得把站点自己的
+         节拍挤成我们的。fi 与上一拍相同才算冻住。 */
+      var fi = all.indexOf(cur[0]);
+      if (vm.__bwHealFi === fi) {
+        var top = (document.scrollingElement || document.body).scrollTop;
+        var a = top - (vm.first_scroll || 0) - (vm.last_scrolltop || 0);
+        var d = Math.max(a, vm.get_item_H('start', 1) || 0, 1);
+        /* 站点这条推进要求"进窗/出窗两端都有条目"。顶在文档底时按当前位移问它,
+           拿到的常常是只进不出(实测 {top:2,bot:0})→ 整块跳过、窗口冻住,
+           而文档已经滚不动,再没有下一拍。按倍放大再问,最多 8 倍(约十张卡)。 */
+        for (var m = 1; m <= 8; m++) {
+          if (advanceMax(vm, d * m)) break;
+        }
+      }
+      vm.__bwHealFi = fi;
+    } catch (e) { /* ignore */ }
+  }
+
+  function armFeedHeal() {
+    if (window.__bwFeedHeal) return;
+    window.__bwFeedHeal = setInterval(feedHealTick, 2000);
   }
 
   /** 记账同步到双列口径:.hei 减半 + 门槛同口径 + 窗口化留出头部余量。
@@ -2403,6 +2497,8 @@
     if (masonObs) { try { masonObs.disconnect(); } catch (e) { /* ignore */ } masonObs = null; }
     masonEl = el;
     if (!el) return;
+    /* 手机单列不接管排布,但"顶到底"那道口死一样存在 —— 心跳在见到 feed 容器时就装上 */
+    armFeedHeal();
     try {
       masonObs = new MutationObserver(function () { masonryFromMutation(); });
       masonObs.observe(el, {attributes: true, childList: true, subtree: true});
@@ -2835,6 +2931,17 @@
       /* 头条文章页(card.weibo.com/article/m/show/…):也是 .m-container-max 壳,
          但版式要单独按阅读栏排,给 theme.js 一个结构标记 */
       root.classList.toggle('bw-article', !!document.querySelector('.m-feed .f-art, h2.f-art-tit'));
+      /* 微服务落地页(/c/wbox?id=…):只有一块 .m-v8-m2(App 图标 + "打开微博客户端"
+         按钮),在纯 WebView 里就是一张打不开的插画。标记给 theme.js 收成可读的一屏。 */
+      root.classList.toggle('bw-wbox',
+        p.indexOf('/c/wbox') === 0 && !!document.querySelector('.m-v8-m2'));
+      /* 热点直播活动页(weibo.com/l/wblive/act):站点脚本要一个只有微博客户端才有的
+         `wbx` 全局,在 WebView 里抛 ReferenceError 后永久停在 "loading..."。
+         这里只在**确实没渲染出内容**时打标记,真能加载的直播页不受影响。 */
+      var liveApp = document.getElementById('app');
+      var liveTxt = liveApp ? (liveApp.textContent || '').trim() : '';
+      root.classList.toggle('bw-livefail',
+        /^\/l\/wblive\//.test(p) && /^loading\.{0,3}$/i.test(liveTxt));
       killAppNags();
       layoutBlogger();      /* 大屏两栏:先分组再让 masonry 认容器(这一族其实没有信息流网格,顺序只为稳妥) */
       masonry();
@@ -2901,6 +3008,10 @@
       anchorFrozen = listAnchor ? {key: listAnchor.key, id: listAnchor.id, off: listAnchor.off} : null;
     }
     lastRoute = now;
+    /* 上一页留下的"上滑收起"锁存不能带进新页面:SPA 换路由常发生在滚动中途,
+       新页第一帧的 y 与旧页最后一帧的 y 比较会得出错误的收起态(甚至一路收起)。 */
+    lastY = -1;
+    scrollHide = false;
     return true;
   }
 
