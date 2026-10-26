@@ -1231,12 +1231,16 @@
     /* 站点自己有返回控件时代理它;像"意见反馈"(/p/…)那种整页没有任何返回入口的子页,
        也放行悬浮球 —— 球里没有可代理的目标时点击走 history.back(),语义与站点那条返回链一致。
        首页/搜索/消息/我的这四页由悬浮导航负责出口,不额外浮球。 */
+    var hcls = document.documentElement.classList;
     var inner = !isMainTab();
     var back = firstVisible(BACK_SEL);
     /* 站点自己的箭头还在屏幕上(撰写页顶栏那颗不归我们收),就不要再叠一颗球压上去
        (实测球 14..56 正好盖住站点箭头 10,15 16x16);被我们 CSS 收掉的顶栏 rect 是 0x0,
-       那种页面恰恰需要这颗球。 */
-    fb.style.display = (!video && !onScreen(back) && (back || inner)) ? 'flex' : 'none';
+       那种页面恰恰需要这颗球。
+       主标签页只看 inner,不再拿 back 兜底:SPA 从正文页返回首页时,旧页那颗
+       .lite-page-top .nav-left 在同一帧里还没被摘掉(0x0),旧判据会把球以 fixed
+       留在首页顶上一段(实测 253ms,直到首页 DOM 换完才消失)。 */
+    fb.style.display = (!video && inner && !onScreen(back)) ? 'flex' : 'none';
     set.style.display = (!video && document.querySelector(SET_SEL)) ? 'flex' : 'none';
     // 手机端保留站点那条底栏(已改成横向悬浮),所以竖置操作栏只在平板出现
     acts.style.display = (wide && deep && !video && editor) ? 'flex' : 'none';
@@ -1249,7 +1253,6 @@
        随内容一起滚走,所以这里不再给它打 .bw-scroll-hide。平板仍保持固定返回球
        (它本来就不遮挡内容,需求的结论是不用改)。评论条仍按 deepHideAt 原阈值
        收放(2026-09-26 那条对评论条继续有效)。 */
-    var hcls = document.documentElement.classList;
     var reading = deep || hcls.contains('bw-page-me') || hcls.contains('bw-cardpage');
     var chrome = hidden && reading && !hcls.contains('bw-editor-open');
     fb.classList.toggle('bw-scroll-hide', chrome && !deep);
