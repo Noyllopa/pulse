@@ -151,7 +151,15 @@ public class MainActivity extends AppCompatActivity {
     private int lastVideoH;
     private long lastVideoAt;
     private boolean loginSkipped;
-    private boolean loginCorrected;
+    /**
+     * 会话失效后的纠正分两档:第一档只导航到登录页、保留 Cookie,让 passport 用 SSO
+     * 试一次(SSO 还有效时用户不用重新输密码);被 302 回首页说明本地只剩访客会话,
+     * 第二档才清全部 Cookie 再进。两档都试过仍回到首页就不再自动跳,避免死循环。
+     */
+    private boolean loginSoftTried;
+    private boolean loginHardTried;
+    /** 这一趟登录页是我们主动送进去的:首帧先让 passport 自己走完 SSO,别按本地 Cookie 弹回首页 */
+    private boolean loginEntry;
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -339,8 +347,10 @@ public class MainActivity extends AppCompatActivity {
         } else if (isLoggedIn()) {
             webView.loadUrl(HOME_URL);
         } else {
-            // 未登录:直接进入登录界面
-            webView.loadUrl(LOGIN_URL);
+            // 未登录:直接进入登录界面。首屏已经站在登录页,软档算用掉;
+            // 若被 302 弹回首页,下一次自愈直接走"清 Cookie"那一档
+            loginSoftTried = true;
+            enterLoginPage();
         }
     }
 
@@ -467,7 +477,11 @@ public class MainActivity extends AppCompatActivity {
         return url != null && url.contains("/compose");
     }
 
-    /** 通过会话 Cookie(MLOGIN=1 / SUB)判断微博登录态 */
+    /**
+     * 通过会话 Cookie 判断微博登录态。只认 SUB:MLOGIN 更像页面标记,会比会话活得久,
+     * 只剩 MLOGIN=1 时首屏会先进首页、再由 /api/config 自愈,多闪一下;
+     * 访客 SUB 也可能满足长度条件,所以服务端口径仍以 /api/config 为准。
+     */
     private boolean isLoggedIn() {
         String cookie = CookieManager.getInstance().getCookie("https://m.weibo.cn/");
         if (cookie == null) {
@@ -475,7 +489,7 @@ public class MainActivity extends AppCompatActivity {
         }
         for (String pair : cookie.split(";")) {
             String p = pair.trim();
-            if ("MLOGIN=1".equals(p) || (p.startsWith("SUB=") && p.length() > 4)) {
+            if (p.startsWith("SUB=") && p.length() > 4) {
                 return true;
             }
         }
@@ -484,18 +498,37 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * 兜底:本地 Cookie 判定为已登录、但服务端会话实际已失效时,
-     * 由页面脚本查 /api/config 后回调,本次会话内纠正一次到登录页
+     * 由页面脚本查 /api/config 后回调,本次会话内纠正到登录页
      * (用户按返回键跳过后不再强制)。
-     * 跳转前先清掉 Cookie:残留的访客 SUB 会让 passport 认为已有会话,
-     * 直接 302 回首页,登录界面根本停不住。
+     *
+     * 第一档先不清 Cookie:passport 能用残留的 SSO 会话直接续登,
+     * 用户不必重新输账号密码;只有登录页被 302 回首页(本地只剩访客会话、
+     * 登录界面停不住)时,才走第二档清掉全部 Cookie 再进。
+     * 两档都试过仍回到首页就不再自动跳,把下一次机会留给用户主动点"我的"。
      */
     private void redirectToLogin() {
-        if (loginSkipped || loginCorrected || isOnLoginPage()) {
+        // loginEntry:已经把登录页推上去了(或正在路上),别让同一趟里的第二次回调
+        // 越过软档直接把 Cookie 清掉
+        if (loginSkipped || loginEntry || isOnLoginPage()) {
             return;
         }
-        loginCorrected = true;
+        if (!loginSoftTried) {
+            loginSoftTried = true;
+            enterLoginPage();
+            return;
+        }
+        if (loginHardTried) {
+            return;
+        }
+        loginHardTried = true;
         CookieManager.getInstance().removeAllCookies(
-                ignored -> runOnUiThread(() -> webView.loadUrl(LOGIN_URL)));
+                ignored -> runOnUiThread(this::enterLoginPage));
+    }
+
+    /** 主动进入登录页:记下这一趟,首帧不要被 onPageFinished 的 Cookie 自愈弹回首页 */
+    private void enterLoginPage() {
+        loginEntry = true;
+        webView.loadUrl(LOGIN_URL);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -666,6 +699,14 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                 super.doUpdateVisitedHistory(view, url, isReload);
+                // 登录流程结束、落回站内:下一次再进登录页时,首帧自愈照常生效。
+                // 刚登录完的 Cookie 先落盘,别等下一次 onPause
+                if (url != null && url.contains("m.weibo.cn")) {
+                    if (loginEntry) {
+                        loginEntry = false;
+                        CookieManager.getInstance().flush();
+                    }
+                }
                 syncRefreshGesture();
             }
 
@@ -698,8 +739,10 @@ public class MainActivity extends AppCompatActivity {
                     view.postDelayed(scrollToTop, 400);
                     view.postDelayed(scrollToTop, 900);
                 }
-                // Cookie 竞态自愈:实际已登录却被停在登录页时回主页
-                if (isOnLoginPage() && isLoggedIn()) {
+                // Cookie 竞态自愈:实际已登录却被停在登录页时回主页。
+                // 但这一趟若是我们主动送进来的,先让 passport 自己走完 SSO ——
+                // 本地残留的 MLOGIN/SUB 会让它被当场弹回首页,登录界面永远停不住
+                if (isOnLoginPage() && isLoggedIn() && !loginEntry) {
                     view.loadUrl(HOME_URL);
                     return;
                 }
@@ -950,13 +993,14 @@ public class MainActivity extends AppCompatActivity {
 
         /**
          * 用户主动点了只有登录才用得上的入口("我的")。这一按是明确意图,
-         * 不能再被"按返回键跳过登录"和"本次会话已纠正过一次"这两道自动闸门吃掉。
+         * 不能再被"按返回键跳过登录"和"本次会话已纠正过"这两道自动闸门吃掉。
          */
         @JavascriptInterface
         public void requestLogin() {
             runOnUiThread(() -> {
                 loginSkipped = false;
-                loginCorrected = false;
+                loginSoftTried = false;
+                loginHardTried = false;
                 redirectToLogin();
             });
         }
@@ -1091,6 +1135,8 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onPause() {
+        // Cookie 落盘是异步的:退后台时补一次,免得进程被系统回收时刚登录的会话没写进磁盘
+        CookieManager.getInstance().flush();
         webView.onPause();
         super.onPause();
     }
@@ -1103,6 +1149,8 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        // 从最近任务划掉时 onPause 不一定走到,这里再补一次
+        CookieManager.getInstance().flush();
         webView.destroy();
         super.onDestroy();
     }

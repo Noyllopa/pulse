@@ -498,12 +498,27 @@
       return;
     }
     try {
-      fetch('/api/config', {credentials: 'include'})
+      /* no-store + 时间戳:这个响应用来决定要不要清 Cookie 跳登录,
+         一旦命中旧缓存(比如上次未登录时留下的)就会把刚登好的会话误判成失效 */
+      fetch('/api/config?_=' + Date.now(), {credentials: 'include', cache: 'no-store'})
         .then(function (r) { return r.json(); })
         .then(function (j) {
           cfg = (j && j.data) || null;
-          if (cfg && !cfg.login && window.BwNative && window.BwNative.needLogin) {
-            window.BwNative.needLogin();
+          /* 刚登录、SSO 回跳或 Cookie 正在落盘时,这个接口可能短暂返回 login:false。
+             先等一小会儿再确认一次,仍为未登录才让原生跳登录页 —— 否则会把刚建立的
+             会话当成失效,而纠正路径又会清 Cookie,用户就被迫重新登录。 */
+          if (cfg && !cfg.login) {
+            setTimeout(function () {
+              fetch('/api/config?_=' + Date.now(), {credentials: 'include', cache: 'no-store'})
+                .then(function (r) { return r.json(); })
+                .then(function (k) {
+                  var again = (k && k.data) || null;
+                  if (again && !again.login && window.BwNative && window.BwNative.needLogin) {
+                    window.BwNative.needLogin();
+                  }
+                })
+                .catch(function () { /* 网络失败不当作未登录 */ });
+            }, 1200);
           }
           if (cb) cb(cfg);
         })
@@ -919,14 +934,22 @@
      - /u/<uid> 是他人主页,页底本来就有站点自己的操作栏(关注/私信),导航栏浮上来会压住它,
        所以不列进来。旧正则里的 `u\/` 后面还跟着"必须再来一个 / 或结束",实际上从没匹配过 /u/<uid>;
        这里按真实意图写清,行为不变。 */
-  function isMainTab() {
-    var p = location.pathname, s = location.search || '';
+  function isMainPath(p, s) {
+    s = s || '';
     if (/^\/(index\.html)?$/.test(p)) return true;
     if (/^\/(my|profile)(\/|\?|$)/.test(p)) return true;
-    if (/^\/message(\/|$)/.test(p) && p.indexOf('/message/chat') !== 0) return true;
+    if (/^\/message\/?$/.test(p)) return true;
     if (/^\/search/.test(p) && s.indexOf('q=') === -1 && s.indexOf('q%3D') === -1) return true;
     return false;
   }
+  function isMainTab() {
+    return isMainPath(location.pathname, location.search || '');
+  }
+  /* 主消息页(/message)留着底部导航,但也需要一颗返回球:它既可能从博主主页的
+     "私信"按钮进来,也可能从底部导航进来 —— 两种来源都该能退回上一页。
+     站点自己那条 .lite-page-top 被我们收掉了,球代理它的 .nav-left($router.back)。
+     另外 /message/atme、/message/cmts、/message/notes 这些子页**不是**主 tab,
+     isMainPath 只认 /message 本身,它们按二级页走球并把底部导航收掉。 */
   var SET_SEL = '.prf-topbar .nav-right';
   var ACTS = [
     {k: 'cmt', label: '评论', icon: ICONS.cmt, sel: '.lite-page-editor .box-left'},
@@ -1230,9 +1253,10 @@
     var video = overlayOpen();
     /* 站点自己有返回控件时代理它;像"意见反馈"(/p/…)那种整页没有任何返回入口的子页,
        也放行悬浮球 —— 球里没有可代理的目标时点击走 history.back(),语义与站点那条返回链一致。
-       首页/搜索/消息/我的这四页由悬浮导航负责出口,不额外浮球。 */
+       首页/搜索/我的这四页由悬浮导航负责出口,不额外浮球;消息页例外:它保留底部导航,
+       但同时给一颗返回球(主消息页与所有 /message/* 子页都要能退回上一页)。 */
     var hcls = document.documentElement.classList;
-    var inner = !isMainTab();
+    var inner = !isMainTab() || /^\/message\/?$/.test(location.pathname);
     var back = firstVisible(BACK_SEL);
     /* 站点自己的箭头还在屏幕上(撰写页顶栏那颗不归我们收),就不要再叠一颗球压上去
        (实测球 14..56 正好盖住站点箭头 10,15 16x16);被我们 CSS 收掉的顶栏 rect 是 0x0,
@@ -2696,6 +2720,18 @@
       } else if (t === '私信') {
         btns[i].classList.add('bw-act-dm');
       }
+    }
+    /* 站点给这颗菜单按钮的文案是动态拼的(正常是"他的热门"/"她的热门"),个别资料
+       只下发"的热门" —— 开头那个"的"没有主语。只修这一种残缺串,其余原样保留。
+       不能只取第一颗 .toolbar_menu_list:已关注时"已关注"自己也是一颗菜单,
+       热门那颗排在它后面。同时改 Vue 的 btn.name:只改 DOM 下次重渲染会写回来。 */
+    var menus = bar.querySelectorAll('.toolbar_menu_list');
+    for (var k = 0; k < menus.length; k++) {
+      var mh = menus[k].querySelector('h4');
+      if (!mh || (mh.textContent || '').trim() !== '的热门') continue;
+      var vm = menus[k].__vue__;
+      if (vm && vm.btn && vm.btn.name === '的热门') vm.btn.name = '热门';
+      mh.textContent = '热门';
     }
   }
 
