@@ -148,7 +148,15 @@
       if (img.__bwSrc === src) return; // 同一地址只处理一次
       if (!bigEnough(img) || isAvatar(img)) return;
       img.__bwSrc = src;
-      badge(src, function (data) { img.src = data; });
+      /* 取像素是异步的,回来时这张 img 可能已经被站点指去别处(懒加载升清、
+         看图器翻页复用同一个节点)。写回前按**属性**核一次身份:currentSrc 要等
+         新图解码完才跟上,拿它当判据会在这段窗口里把旧图的圆角底盖到新 src 上,
+         而那一盖之后 src 变成 data: 开头,下一轮扫描直接跳过 —— 新图永久丢失。 */
+      var wasSrc = img.getAttribute('src'), wasSet = img.getAttribute('srcset');
+      badge(src, function (data) {
+        if (img.getAttribute('src') !== wasSrc || img.getAttribute('srcset') !== wasSet) return;
+        img.src = data;
+      });
     }
 
     /**
@@ -231,7 +239,6 @@
     }
 
     function fixBg(el) {
-      if (el.__bwBg) return;
       if (el.classList && el.classList.contains('unlogin-logo')) return; // 由内置徽章接管
       if (isAvatar(el)) return;
       var bg = '';
@@ -239,11 +246,22 @@
       var m = bg.match(/url\(["']?([^"')]+)/);
       if (!m) return;
       if (!bigEnough(el)) return;
-      el.__bwBg = true;
       var url;
       try { url = new URL(m[1], location.href).href; } catch (e) { url = m[1]; }
       if (/^data:/i.test(url) || /\.gif(\?|#|$)/i.test(url)) return;
+      /* 记地址而不是一个布尔:一次性标记会把元素永久锁在第一次那张底图上,
+         站点之后换了封面/复用卡片换了图,新底图就再也拿不到圆角底。
+         自己写上去的那份是 data: ,上一行已经挡掉,不会和这里对拍。 */
+      if (el.__bwBg === url) return;
+      el.__bwBg = url;
+      var token = m[1];
       badge(url, function (data) {
+        /* 取像素是异步的,回来时底图可能已经换了。这里写的是 !important,
+           盖上去站点自己的后续修改就压不动了 —— 写前按当前计算值核一次身份。 */
+        var now = '';
+        try { now = getComputedStyle(el).backgroundImage || ''; } catch (e) { return; }
+        var nm = now.match(/url\(["']?([^"')]+)/);
+        if (!nm || nm[1] !== token) return;
         el.style.setProperty('background-image', 'url("' + data + '")', 'important');
       });
     }
@@ -329,6 +347,15 @@
         try {
           var imgs = document.images;
           for (var i = 0; i < imgs.length; i++) { fixImg(imgs[i]); fixSmallImg(imgs[i]); fixPassportLogo(imgs[i]); }
+          /* 小图的下钻修复会把 img 包进一个定尺外壳。站点回收卡片时常常只删 img、
+             留下父容器,外壳就成了一个空占位(实测 50×50)。没有子 img 的壳已无用处,
+             顺手摘掉;带 img 的壳不动,6 倍兜底照旧。 */
+          var shells = document.querySelectorAll('[data-bw-avshell]');
+          for (var k = 0; k < shells.length; k++) {
+            if (!shells[k].querySelector('img') && shells[k].parentNode) {
+              shells[k].parentNode.removeChild(shells[k]);
+            }
+          }
           // CSS 背景图只可能是叶子节点(如未登录页 logo),避免全量 getComputedStyle
           var leaves = document.querySelectorAll('i,span,div,a,em');
           for (var j = 0; j < leaves.length; j++) {

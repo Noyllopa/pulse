@@ -15,9 +15,6 @@
 
   var FULL_SWIPE_SECONDS = 60;   // 拖满整个播放器宽度 = 60s
   var START_THRESHOLD = 10;      // 超过这个横向位移才算拖动,避免吃掉点击
-  // 看图器里的短片阈值:live 图实测 2.58 / 2.83 / 3.01s,真视频 38.64 / 143.4s。
-  // 拖满一整屏等于 60s,对 3s 的片子只有"跳到结尾"一种结果 —— 不值得为它抢掉翻页。
-  var FLIP_UNDER_SECONDS = 10;
 
   function secondsPerPx(host) {
     var w = host.getBoundingClientRect().width || 1;
@@ -199,14 +196,19 @@
       var player = playerOf(host);
       var ctl = player ? qualityCtl(player) : null;
       var r = ctl ? readQuality(ctl) : {top: null, atTop: false};
+      /* 全部档位先记账,再判要不要升 —— 顺序反了这一本就只记到当前那一路。
+         片子一开始就在最高档时账里只有高档地址,用户手动降到标清后 key 变成
+         低档地址、账里查不到,就被当成"换了一条片子"重新起账,下一拍又顶回最高。 */
+      if (ctl) {
+        var list = (ctl.btn.options_ && ctl.btn.options_.qualityList) || [];
+        for (var i = 0; i < list.length; i++) {
+          if (list[i] && list[i].src && seen.indexOf(list[i].src) < 0) seen.push(list[i].src);
+        }
+      }
       if (r.atTop) return;
       if (!r.top) {                              // 组件树还没建好:再等一拍
         if (++tries < Q_TRIES) setTimeout(step, Q_EVERY);
         return;                                  // 等不到就不管这条片子
-      }
-      var list = (ctl.btn.options_ && ctl.btn.options_.qualityList) || [];
-      for (var i = 0; i < list.length; i++) {
-        if (list[i] && list[i].src && seen.indexOf(list[i].src) < 0) seen.push(list[i].src);
       }
       try {
         applyQuality(player, ctl, r.top);
@@ -374,19 +376,21 @@
      48 一格、VideoJS 图标字体,全是站点已经加载好的那份 CSS,我们只写定位与行为。
      每颗按钮都要带 vjs-button:图标字号那条是 `.vjs-button > .vjs-icon-placeholder:before`,
      漏了它那颗音量键会退回 1em(12px),比播放/全屏的 1.8em(21.6px)小一整号。
-     live 图与动图不在此列(见下面 isLoopClipSrc)。 */
-  /* 站点把"点开就是循环放一小段"的两种卡片都渲染成 <video>,它们都不该有播放器控件条:
-     live 图的直链固定是 video.weibo.com/media/play?livephoto=<编码后的 .mov>
-     (见 media_save.js#saveMediaUrl);动图是 gif 转的 mp4,直链带 `label=gif_mp4`
-     (实测 2.07s、212x204)。分辨只看这两个标记,不看时长 —— 元数据是异步到的,
-     按时长判会让控件条先冒出来再收回去。 */
-  function isLoopClipSrc(v) {
-    var s = v.currentSrc || v.src || '';
-    if (!s && v.querySelector) {
-      var so = v.querySelector('source');
-      s = so ? (so.src || so.getAttribute('src') || '') : '';
-    }
-    return s.indexOf('livephoto=') >= 0 || s.indexOf('gif_mp4') >= 0;
+     live 图与动图不在此列(见下面 clipKind)。 */
+  /* 站点把"点开就是循环放一小段"的两种卡片都渲染成 <video>(live 图 / 动图),
+     它们不该有播放器控件条。判据统一放在 clip_kind.js(直链标记 livephoto= / gif_mp4,
+     元数据未到之前不猜),这里只查 BwClip;脚本万一没注入,退回"按视频处理",
+     与旧行为一致。 */
+  function clipKind(v) {
+    return window.BwClip && window.BwClip.kindOf ? window.BwClip.kindOf(v) : 'video';
+  }
+
+  /* 横滑 seek 看两件事:片子有正时长(能 seek),且确实按"真视频"分类。
+     看图器里 live 图/动图横滑要留给站点翻页。旧实现拿 duration<10s 猜循环短片,
+     会把 10 秒内的真视频也挡掉 —— 现改查同一套标记。 */
+  function canSeek(video, gallery) {
+    if (!video || !isFinite(video.duration) || video.duration <= 0) return false;
+    return !gallery || clipKind(video) === 'video';
   }
 
   function liveRoot() {
@@ -397,16 +401,32 @@
     return p;
   }
 
-  /* 当前这一页的真视频:矩形落在视口里、且不是循环短片(live 图/动图) */
+  /* 当前这一页的真视频:矩形落在视口里、且分类确实是 video。
+     分类未知(直链还没到/元数据没到)时也先不建条,避免动图先冒条再收回。 */
   function galVideo(p) {
     var vs = p.querySelectorAll('video');
     for (var i = 0; i < vs.length; i++) {
       var r = vs[i].getBoundingClientRect();
       if (r.width < 40 || r.right < 20 || r.left > innerWidth - 20) continue;
-      if (isLoopClipSrc(vs[i])) continue;
+      if (clipKind(vs[i]) !== 'video') continue;
       return vs[i];
     }
     return null;
+  }
+
+  /* 当前这根控件条。旧的"每建一根条各挂一套 window/document 监听"会在图库重建后
+     累积,且闭包一直拽着旧条;改成全局只挂一套、经 galCur 转发到当前条。 */
+  var galCur = null;
+
+  function watchGalleryGlobals() {
+    if (watchGalleryGlobals.bound) return;
+    watchGalleryGlobals.bound = true;
+    window.addEventListener('pointerup', function (e) {
+      if (galCur && galCur.bar && galCur.bar.__endDrag) galCur.bar.__endDrag(e);
+    }, true);
+    document.addEventListener('fullscreenchange', function () {
+      if (galCur && galCur.bar && galCur.bar.__fsSync) galCur.bar.__fsSync();
+    });
   }
 
   function buildGalBar() {
@@ -446,6 +466,7 @@
       bar.style.setProperty('top', 'auto', 'important');
       wireGalBar(p, bar);
     }
+    galCur = {p: p, bar: bar};
     syncGalBar(p, bar);
   }
 
@@ -456,6 +477,11 @@
       if (cur === vid) return;
       cur = vid;
       wake();
+      /* 换到下一段片子时把这一层记住的倍速再应用一次:预加载的那条可能早就元数据
+         就绪,不会再有 loadedmetadata,只做"切换绑定"的话它仍是 1×。 */
+      if (vid && typeof window.__bwSpeedPref === 'number' && vid.playbackRate !== window.__bwSpeedPref) {
+        try { vid.playbackRate = window.__bwSpeedPref; } catch (e) { /* ignore */ }
+      }
       if (!vid || vid.__bwGalBound) return;
       vid.__bwGalBound = true;
       var once = function (fn) { return function () { if (cur === vid) fn(); }; };
@@ -535,6 +561,13 @@
       }
       /* 全屏请求发给整层看图器而不是 <video>:HTML5 全屏只渲染 :fullscreen 那棵子树,
          只让 video 进全屏的话这条控件条就不在子树里,又变成"全屏后没控件"。 */
+      /* 这条条子挂在整层看图器上,不在播放器宿主里,按它不会经过 bind() 那条 pushAspect
+         的捕获链 —— 原生手里可能还是上一条片子的比例,或者压根没有(默认横屏)。
+         发请求之前先按当前这条报一次,竖片才不会被横过来。 */
+      var gx = v();
+      if (gx && gx.videoWidth && window.BwNative && window.BwNative.setVideoAspect) {
+        window.BwNative.setVideoAspect(gx.videoWidth, gx.videoHeight);
+      }
       var rq = p.requestFullscreen || p.webkitRequestFullscreen || p.webkitRequestFullScreen;
       try { if (rq) rq.call(p); } catch (err) { /* ignore */ }
     });
@@ -572,7 +605,9 @@
     };
     bar.querySelector('.vjs-progress-control').addEventListener('pointerup', endDrag);
     bar.querySelector('.vjs-progress-control').addEventListener('pointercancel', endDrag);
-    window.addEventListener('pointerup', endDrag, true);
+    /* 这两条全局监听由 watchGalleryGlobals 只挂一次,target 一律转发给当前条 ——
+       旧写法在每根新条上各挂一对,图库重建后旧闭包连同旧控件一直留在 window 上。 */
+    bar.__endDrag = endDrag;
     /* 收起倍速菜单:按下落在条子外面就收 */
     p.addEventListener('pointerdown', function (e) {
       var el = bar.__speedEl;
@@ -623,11 +658,12 @@
       else sleep();
     }, true);
     p.addEventListener('pointercancel', function () { tt = 0; }, true);
-    document.addEventListener('fullscreenchange', function () {
+    bar.__fsSync = function () {
       var fs = document.fullscreenElement || document.webkitFullscreenElement;
       bar.classList.toggle('vjs-fullscreen', !!fs);
       syncGalBar(p, bar);
-    });
+    };
+    watchGalleryGlobals();
     bar.__state = state;
   }
 
@@ -701,9 +737,8 @@
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       if (isProgressBar(e.target)) return;
       video = videoOf(host);
-      if (!video || !isFinite(video.duration) || video.duration <= 0) return;
-      // 看图器里的 live 图/动图:横滑归站点翻页
-      if (gallery && video.duration < FLIP_UNDER_SECONDS) { video = null; return; }
+      // 看图器里的 live 图/动图:横滑归站点翻页(按标记判定,不再看时长)
+      if (!canSeek(video, gallery)) { video = null; return; }
       startX = e.clientX;
       startY = e.clientY;
       startTime = video.currentTime;
@@ -785,7 +820,7 @@
        "这种微博的播放页下面没有进度条那一排"就是它。控件条由 buildGalBar 自己搭
        (借 video.js 的类名吃站点的样式),所以这里一律关掉浏览器原生控件:
        原生那条在闭 shadow root 里改不了样式,留着就是两种样子叠在一起。
-       live 图与动图不搭也不加(它们是循环短片) —— 分辨看 isLoopClipSrc。 */
+       live 图与动图不搭也不加(它们是循环短片) —— 分辨统一查 BwClip.kindOf。 */
     var groot = liveRoot();
     if (groot) {
       var gal = groot.querySelectorAll('video');

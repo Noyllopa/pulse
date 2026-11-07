@@ -513,6 +513,9 @@
                 .then(function (r) { return r.json(); })
                 .then(function (k) {
                   var again = (k && k.data) || null;
+                  /* 复查结果就是新的权威:确认登录了要写回 cfg,否则"我的"仍按首次那份
+                     未登录快照把人送去登录页 */
+                  if (again) cfg = again;
                   if (again && !again.login && window.BwNative && window.BwNative.needLogin) {
                     window.BwNative.needLogin();
                   }
@@ -1112,7 +1115,10 @@
      轻则 touchcancel 冻结翻页,重则整页被返回掉(2026-10-07 实测)。
      JS 侧按矩形字符串去重,原生侧再做一层等值判断;正文页走 edObs 的批次,
      撰写页没有 .lite-page-editor,由主观察器和 resize 兜着报。 */
-  var lastPanelRect = '';
+  /* 初值必须是 null 而不是 '':去重键对"没有面板"也是空串,新文档里首次求值时
+     空串 == 空串就被判成"没变化"、清除通知发不出去,原生还留着上一页的排除矩形。
+     null 保证每份文档至少上报一次(没有面板就报 0,0,0,0 清掉)。 */
+  var lastPanelRect = null;
   /* 翻页的两处收尾修补(2026-10-07 用户报"左拉顺、右拉总会卡一下")
      1) 判定:站点 onPanEnd 用「均速>5px每事件 / >0.5页宽 / >150px」,第一条在 60Hz
         触点采样下几乎打不到,此前只把右拉放宽到 0.3 页宽 —— 于是同一把力度右拉翻页、
@@ -1253,10 +1259,14 @@
     var video = overlayOpen();
     /* 站点自己有返回控件时代理它;像"意见反馈"(/p/…)那种整页没有任何返回入口的子页,
        也放行悬浮球 —— 球里没有可代理的目标时点击走 history.back(),语义与站点那条返回链一致。
-       首页/搜索/我的这四页由悬浮导航负责出口,不额外浮球;消息页例外:它保留底部导航,
-       但同时给一颗返回球(主消息页与所有 /message/* 子页都要能退回上一页)。 */
+       首页/搜索这两页由悬浮导航负责出口,不额外浮球;消息页例外:它保留底部导航,
+       但同时给一颗返回球(主消息页与所有 /message/* 子页都要能退回上一页)。
+       「我的」页(旧版 /profile 模板)也算例外:它的 .prf-topbar 被 theme.js 整条收掉
+       (返回/设置改由悬浮件承担),但主 tab 判据又把球一起挡掉了 —— 两头都当对方会出,
+       实测结果就是整页没有任何返回入口。顶栏真没了,就必须放球。 */
     var hcls = document.documentElement.classList;
-    var inner = !isMainTab() || /^\/message\/?$/.test(location.pathname);
+    var inner = !isMainTab() || /^\/message\/?$/.test(location.pathname)
+      || !!document.querySelector('.prf-topbar .nav-left');
     var back = firstVisible(BACK_SEL);
     /* 站点自己的箭头还在屏幕上(撰写页顶栏那颗不归我们收),就不要再叠一颗球压上去
        (实测球 14..56 正好盖住站点箭头 10,15 16x16);被我们 CSS 收掉的顶栏 rect 是 0x0,
@@ -1371,7 +1381,13 @@
         if (ul.__bwClamp !== n) { ul.__bwClamp = n; ul.__bwTile = null; }
         continue;
       }
-      if (ul.__bwClamp === n && ul.__bwTile && ul.__bwTile.isConnected) continue;
+      var cardEl = ul.closest ? ul.closest('.wb-item-wrap') : null;
+      if (ul.__bwClamp === n && ul.__bwTile && ul.__bwTile.isConnected) {
+        /* 已经裁好了:站点会在某些时机(新一页回来时按 offsetHeight 重记一遍)
+           把账写回"裁剪前"的高度,所以每趟都对着渲染高核一次 */
+        if (cardEl) syncClampHei(cardEl);
+        continue;
+      }
       ul.__bwClamp = n;
       var tile = null;
       for (var k = NINE_KEEP; k < n; k++) {
@@ -1384,7 +1400,60 @@
         }
       }
       ul.__bwTile = tile;
+      if (cardEl) syncClampHei(cardEl);
     }
+  }
+
+  /* 裁剪把卡片压矮了,可站点那条高度账是**在本函数之前**量好的:它在
+     $nextTick 里按 offsetHeight 量一次就写进 item.hei,而那一下我们还没裁。
+     账没跟着改,站点回收这张卡时按裁剪前的高度补 padding-top、实际只腾出裁剪后
+     的高度,多出来的那截把整屏内容往下推一次 —— 惯性还在跑时手指按下去截停,
+     这一下最扎眼(实测单列残差 363px,正是一张 >9 图卡被裁掉的量)。
+     所以裁剪落地后、以及此后每趟,都把实测高同步回 .hei,让账与渲染 1:1。
+     用实测高覆盖而不是记"裁掉多少":站点会重记账(实测新一页回来时按
+     offsetHeight 重记一遍,又写回裁剪前的高度),差值口径在重记之后就偏了;
+     实测高每次自洽,顺带把重记过的那次也纠回来。 */
+  function syncClampHei(cardEl) {
+    var list = cardItemsOf(cardEl);
+    if (!list) return;
+    var h = Math.round(cardEl.getBoundingClientRect().height);
+    if (h < 2) return;
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      if (!(it.hei > 1)) continue;
+      /* 宽屏那套账按行高单位记(.hei 已被 syncHeiUnits 减半),而且 layoutPinned
+         每趟都会按实测重写,这里不掺和 */
+      if (it.__bwHalf) continue;
+      if (Math.abs(it.hei - h) >= 2) it.hei = h;
+    }
+  }
+
+  /* 卡片 → 站点记这条账的对象(可能不止一个:list_cur 里那份、list_all 里同 id
+     的那份;站点回收时读的是 list_all 那本账,两边都写)。卡片自己那一层是
+     loadmore 组件,账本挂在它的 $parent 上;v-for 顺序与 DOM 子节点一致,按序号
+     对齐取同一条 —— 本体排布(layoutPinned)也是这么取的。子节点数与 list_cur
+     不等就不认:宁可漏修,不能认错卡写错账。 */
+  function cardItemsOf(el) {
+    var v = null, n = el;
+    while (n && !v) { v = n.__vue__; n = n.parentElement; }
+    for (var i = 0; i < 8 && v; i++) {
+      var cont = v.$refs && v.$refs.cont;
+      if (cont && v.list_cur && cont.contains(el) &&
+          cont.children.length === v.list_cur.length) {
+        var ix = Array.prototype.indexOf.call(cont.children, el);
+        var cur = ix >= 0 ? v.list_cur[ix] : null;
+        if (!cur) return null;
+        var id = cur.id || cur.mid;
+        var out = [cur];
+        for (var j = 0; j < v.list_all.length; j++) {
+          var a = v.list_all[j];
+          if (a !== cur && (a.id || a.mid) === id) out.push(a);
+        }
+        return out;
+      }
+      v = v.$parent;
+    }
+    return null;
   }
 
   /** 在第 9 格的图盒上盖一块 "+x" 面牌(格子的圆角/裁切由站点那层 .m-img-box 自带) */
@@ -2146,6 +2215,7 @@
       colTop[c] = cols[c].length ? cols[c][0].row : 0;
     }
     var upTop = [colTop[0], colTop[1]];
+    var headCut = 0;
     var prepends = [], appends = [];
     for (i = 0; i < recs.length; i++) {
       if (recs[i].col >= 0) continue;
@@ -2156,9 +2226,31 @@
       var p = prepends[i];
       p.span = p.box > 0 ? Math.max(1, Math.round(p.box / MASON_UNIT)) : 1;
       var pc = upTop[0] >= upTop[1] ? 0 : 1;      // 填"列顶更低"的那列,镜像底部的 argmin
-      p.col = pc; p.row = Math.max(0, upTop[pc] - p.span); p.h = p.box;
+      p.col = pc; p.row = upTop[pc] - p.span; p.h = p.box;
       upTop[pc] = p.row;
       cols[pc].push(p);
+    }
+    /* 摞到行 0 以上就要给整套行号让位:CSS Grid 的负行号是从网格**末尾**倒数的,
+       直接写负值会把回插卡甩到文档另一头,而夹到 0 又会让下面的防重叠网把它们
+       顺次推到幸存卡**下方** —— 深处往上刷时新补的旧微博出现在已看内容之后,
+       顺序就反了。内容文档坐标 = padding-top + 行号×UNIT,所以行号整体下移多少,
+       padding-top 就等量减少多少:回插拿到上方的行位,已显示的卡一步不动。
+       让位量以现有 padding 为上限;padding 不够(窗口已在列表头)时不搬,
+       那一档交给下面的防重叠网,与原来一致。 */
+    var upMin = Math.min(0, upTop[0], upTop[1]);
+    if (upMin < 0) {
+      /* 行位是从身份记忆接过来的那一趟,ourPad 还没定,但它必然取 placePad
+         (见下面 restored 那一支)——坐标系就是那一份,拿它算上限。 */
+      var padAvail = st.ourPad !== null ? st.ourPad
+        : (restored && placePad !== null ? placePad : 0);
+      var lift = Math.min(-upMin, Math.floor(Math.max(0, padAvail) / MASON_UNIT));
+      if (lift > 0) {
+        for (c = 0; c < 2; c++) {
+          for (j = 0; j < cols[c].length; j++) cols[c][j].row += lift;
+          colEnd[c] += lift;
+        }
+        headCut = lift * MASON_UNIT;
+      }
     }
     for (i = 0; i < appends.length; i++) {
       var a2 = appends[i];
@@ -2284,6 +2376,7 @@
         st.ourPad = Math.max(0, Math.ceil(vm.padding_top || 0));
       }
     }
+    if (headCut > 0) st.ourPad = Math.max(0, st.ourPad - headCut);
     var wantPad = Math.ceil(st.ourPad) + 'px';
     if (wrap.style.paddingTop !== wantPad) wrap.style.paddingTop = wantPad;
 
@@ -2909,6 +3002,8 @@
   function refresh() {
     try {
       var p = location.pathname;
+      /* 落到他人旧版主页(/profile/{uid})时统一换成 /u/{uid}(见 normalizeProfileRoute) */
+      if (normalizeProfileRoute()) return;
       var cur = 'home';
       if (p.indexOf('/search') === 0 || p.indexOf('/s/') === 0) cur = 'search';
       // 站点的消息路由是 /message,不是 /msg —— 之前只比 '/msg' 会漏判(高亮和版式都受影响)
@@ -3022,6 +3117,61 @@
     } catch (e) { /* ignore */ }
   }
 
+  /* ===== 他人主页归一:站内统一走带分栏的 /u/{uid} =====
+     站点给他人主页下发两套模板:
+       - /profile/{uid}:旧模板,只有 .profile-header + 一份自排网格,没有
+         「精选 / 微博 / 相册」分栏(平板下实测还会出现内容不出来);
+       - /u/{uid}:cardpage 模板,左栏资料 + 右栏 feed + 分栏 —— /n/{nick}
+         也是站点自己 302 过去的那一套。
+     站内所有入口(头像、昵称、@、转发链)的 href 都写成 /profile/{uid},
+     所以统一在这里改写,不给旧模板打补丁。
+     自己主页(/profile/{自己的 uid},链接常带 user_token)保持站点原样;
+     /p/ 那些"全部微博 / 超话 / 话题"卡片页不是个人主页,不碰。 */
+  function profileTarget(a) {
+    var raw = a && a.getAttribute && a.getAttribute('href');
+    if (!raw) return null;
+    var u;
+    try { u = new URL(raw, location.href); } catch (e) { return null; }
+    if (u.hostname !== 'm.weibo.cn') return null;
+    var m = /^\/profile\/(\d+)\/?$/.exec(u.pathname);
+    if (!m) return null;
+    /* cfg 是 /api/config 的结果。没拿到之前不下判断(分不清自己与他人),
+       这一记交给站点原样跳 —— 配置到手后再点就走改写 */
+    if (!cfg || !cfg.uid) return null;
+    if (String(cfg.uid) === m[1]) return null;
+    return 'https://m.weibo.cn/u/' + m[1];
+  }
+
+  /* 捕获阶段拦:站点自己的 SPA 跳转挂在元素上(冒泡阶段),先一步 preventDefault
+     并 stopPropagation,它就不会把 /profile 推进历史、也不会先渲染旧模板。
+     用整页加载落地 /u/,历史里留下的是 /u/ 这一条 —— 返回直接回上一页,
+     不会被"改写到 /profile 再跳回来"弹成死循环。 */
+  try {
+    document.addEventListener('click', function (e) {
+      if (e.defaultPrevented || (e.button || 0) !== 0) return;
+      var n = e.target;
+      while (n && n !== document && !(n.tagName === 'A' && n.getAttribute('href'))) n = n.parentElement;
+      if (!n || n === document) return;
+      var to = profileTarget(n);
+      if (!to) return;
+      e.preventDefault();
+      e.stopPropagation();
+      location.href = to;
+    }, true);
+  } catch (e) { /* ignore */ }
+
+  /* 兜底:有些入口是脚本 router.push('/profile/…') 过来的,没有可拦的 <a>。
+     落地后把这条历史**替换**成 /u/ 版本(replace 不新增记录,返回仍是上一页)。 */
+  var profileRedirecting = false;
+  function normalizeProfileRoute() {
+    if (profileRedirecting || !cfg || !cfg.uid) return false;
+    var m = /^\/profile\/(\d+)\/?$/.exec(location.pathname);
+    if (!m || String(cfg.uid) === m[1]) return false;
+    profileRedirecting = true;
+    location.replace('https://m.weibo.cn/u/' + m[1] + location.hash);
+    return true;
+  }
+
   var timer = null;
   function schedule() {
     if (timer) return;
@@ -3075,9 +3225,12 @@
         restoreListAnchor();
       }
     }, {passive: true});
-    /* 用户自己动了手就别再抢:复位那条链一拍内作废 */
-    document.addEventListener('touchstart', function () { anchorRun++; anchorActive = false; },
-      {passive: true, capture: true});
+    /* 用户自己动了手就别再抢:复位那条链一拍内作废。
+       anchorFrozen 必须跟着清:被顶掉的 step 有 run 守卫、不会走 stop(),
+       留着它 noteListAnchor 会一直拒记,这一趟浏览的新位置全丢。 */
+    document.addEventListener('touchstart', function () {
+      anchorRun++; anchorActive = false; anchorFrozen = null;
+    }, {passive: true, capture: true});
     new MutationObserver(function () {
       /* 快路径:宽屏下信息流容器一出现(或被整换)就立刻挂专守,
          不等 schedule 的 250ms 节流;挂上时 layoutMasonry 同步排首批。
@@ -3127,7 +3280,10 @@
     return null;
   }
   function check() {
-    timer = null;
+    /* 提前结算(起手那一支)时必须把待触发的那次也撤掉:只清 timer 变量会留下一个
+       孤儿回调,它落在新手势中途,把正跟手的 deltaX 当"冻结"收走 —— 用户看到的就是
+       这一把拉到一半自己弹回去 */
+    if (timer) { clearTimeout(timer); timer = null; }
     var v;
     try { v = emoVM(); } catch (e) { return; }
     if (!v || !v.emotionPages || !v.emotionPages.length) return;

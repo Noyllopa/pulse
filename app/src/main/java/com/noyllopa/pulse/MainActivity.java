@@ -52,15 +52,22 @@ import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import androidx.webkit.WebSettingsCompat;
+import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+
+import org.json.JSONArray;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * m.weibo.cn 的 WebView 套壳。
@@ -81,6 +88,23 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String HOME_URL = "https://m.weibo.cn/";
     private static final String LOGIN_URL = "https://passport.weibo.cn/signin/login";
+
+    /** 消息通道在页面里的对象名,bridge.js 按它把 window.BwNative 的调用转成上行报文 */
+    private static final String BRIDGE_OBJECT = "BwBridge";
+    /**
+     * 能调原生能力的来源。所有 http/https 链接都在应用内打开(见 shouldOverrideUrlLoading),
+     * 所以外链点进去也是同一个 WebView —— 桥必须只对微博/新浪这一族开放,否则第三方页面
+     * 就能清 Cookie 跳登录、往相册写文件、改手势排除区。
+     * 通配不匹配裸域,两种写法都要列;host 判据与 nav.js 那条注入白名单同一族。
+     */
+    private static final Set<String> BRIDGE_ORIGINS = new HashSet<>(Arrays.asList(
+            "https://weibo.cn", "https://*.weibo.cn",
+            "https://weibo.com", "https://*.weibo.com",
+            "https://sina.com.cn", "https://*.sina.com.cn",
+            "https://sina.cn", "https://*.sina.cn"));
+    private static final Pattern BRIDGE_HOST =
+            Pattern.compile("^(.+\\.)?(weibo\\.(cn|com)|sina\\.com\\.cn|sina\\.cn)$",
+                    Pattern.CASE_INSENSITIVE);
 
     /**
      * 内置广告规则(子资源请求一律掐掉,主文档导航不动)。
@@ -103,6 +127,10 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
+    /** 网页调过来的原生能力入口,两条通道共用同一份实现(见 configureBridge) */
+    private NativeBridge bridge;
+    /** true = 走带来源白名单的消息通道;false = 老 WebView 退回 JS 接口,由 fromPage 自己判来源 */
+    private boolean bridgeViaMessage;
     /** 网页 nav.js 报上来的分组弹层展开状态,只在展开期间禁掉下拉刷新 */
     private boolean groupDropOpen = false;
     /** 站点看图器(.pswp 浮层,不产生历史记录)是否开着 —— 返回键要先关它 */
@@ -138,6 +166,8 @@ public class MainActivity extends AppCompatActivity {
     private View errorView;
     private ValueCallback<Uri[]> filePathCallback;
     private String darkFixJs;
+    private String bridgeJs;
+    private String clipJs;
     private String seekJs;
     private String mediaJs;
     private String themeJs;
@@ -160,6 +190,12 @@ public class MainActivity extends AppCompatActivity {
     private boolean loginHardTried;
     /** 这一趟登录页是我们主动送进去的:首帧先让 passport 自己走完 SSO,别按本地 Cookie 弹回首页 */
     private boolean loginEntry;
+
+    // 重建 Activity 时要跟着走的登录记账(键名加前缀,避开 WebView.saveState 自己那批)
+    private static final String STATE_LOGIN_SKIPPED = "bw:loginSkipped";
+    private static final String STATE_LOGIN_SOFT_TRIED = "bw:loginSoftTried";
+    private static final String STATE_LOGIN_HARD_TRIED = "bw:loginHardTried";
+    private static final String STATE_LOGIN_ENTRY = "bw:loginEntry";
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -343,6 +379,10 @@ public class MainActivity extends AppCompatActivity {
         configureBackNavigation();
 
         if (savedInstanceState != null) {
+            loginSkipped = savedInstanceState.getBoolean(STATE_LOGIN_SKIPPED);
+            loginSoftTried = savedInstanceState.getBoolean(STATE_LOGIN_SOFT_TRIED);
+            loginHardTried = savedInstanceState.getBoolean(STATE_LOGIN_HARD_TRIED);
+            loginEntry = savedInstanceState.getBoolean(STATE_LOGIN_ENTRY);
             webView.restoreState(savedInstanceState);
         } else if (isLoggedIn()) {
             webView.loadUrl(HOME_URL);
@@ -554,8 +594,8 @@ public class MainActivity extends AppCompatActivity {
             WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, true);
         }
 
-        // 网页通过该桥调起原生视频播放器(仅暴露带 @JavascriptInterface 的方法)
-        webView.addJavascriptInterface(new NativeBridge(), "BwNative");
+        // 网页调原生一律走这条带来源校验的通道(见 configureBridge)
+        configureBridge();
 
         // 加载期间 WebView 的背景色与主题一致,避免深色模式下启动白屏闪烁
         webView.setBackgroundColor(ContextCompat.getColor(this, R.color.web_surface));
@@ -589,7 +629,8 @@ public class MainActivity extends AppCompatActivity {
 
     /** 用系统 DownloadManager 把网页文件存进公共目录(相册 / 下载) */
     private void saveWithDownloadManager(String url, String contentDisposition, String mimeType) {
-        if (TextUtils.isEmpty(url) || url.startsWith("data:")) {
+        // DownloadManager 只收 http/https;blob:、content:、file: 这些交给它会被构造器当场抛出
+        if (TextUtils.isEmpty(url) || !URLUtil.isNetworkUrl(url)) {
             Toast.makeText(this, R.string.download_unsupported, Toast.LENGTH_SHORT).show();
             return;
         }
@@ -642,17 +683,18 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void enqueueDownload(String url, String name, String mimeType, String dir) {
-        DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
-        req.setTitle(name);
-        req.setMimeType(mimeType);
-        req.addRequestHeader("Referer", HOME_URL);
-        String cookie = CookieManager.getInstance().getCookie(url);
-        if (!TextUtils.isEmpty(cookie)) {
-            req.addRequestHeader("Cookie", cookie);
-        }
-        req.setNotificationVisibility(
-                DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
         try {
+            // 构造器自己也会按 scheme 拒收(IllegalArgumentException),必须在 try 里面
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+            req.setTitle(name);
+            req.setMimeType(mimeType);
+            req.addRequestHeader("Referer", HOME_URL);
+            String cookie = CookieManager.getInstance().getCookie(url);
+            if (!TextUtils.isEmpty(cookie)) {
+                req.addRequestHeader("Cookie", cookie);
+            }
+            req.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             // API 29+ 由分区存储放行公共目录;更早的版本在上面那道权限检查里已经拿到写权限
             req.setDestinationInExternalPublicDir(dir,
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ? "pulse/" + name : name);
@@ -667,6 +709,80 @@ public class MainActivity extends AppCompatActivity {
             Log.w(TAG, "download failed: " + url, e);
             Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /**
+     * 页面 → 原生这条通道。
+     *
+     * {@code addJavascriptInterface} 把对象暴露给**所有框架、所有来源**:站外链接点进来
+     * 也是同一个 WebView,那个页面照样能调 requestLogin(清 Cookie)、mediaMenu(往相册写
+     * 文件)、setPanelGesture(改系统手势排除区)。所以优先用 AndroidX 的消息通道 ——
+     * 它按来源白名单注入对象,每条消息还带得到来源与是否主框架。
+     * 老 WebView 没有这个特性时退回 JS 接口,由 {@link #fromPage} 按主框架当前 URL 补一道闸。
+     */
+    private void configureBridge() {
+        bridge = new NativeBridge();
+        bridgeViaMessage = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER);
+        if (bridgeViaMessage) {
+            WebViewCompat.addWebMessageListener(webView, BRIDGE_OBJECT, BRIDGE_ORIGINS,
+                    (view, message, sourceOrigin, isMainFrame, reply) -> {
+                        // 来源白名单只挡跨站;同源 iframe 照样拿得到对象,主框架这一道要自己判
+                        if (isMainFrame) {
+                            dispatchBridge(message.getData());
+                        }
+                    });
+        } else {
+            webView.addJavascriptInterface(bridge, "BwNative");
+        }
+    }
+
+    /** 上行报文是 bridge.js 编的 JSON 数组:["方法名", 参数…]。认不出的方法名一律丢掉 */
+    private void dispatchBridge(String payload) {
+        if (payload == null) {
+            return;
+        }
+        try {
+            JSONArray a = new JSONArray(payload);
+            switch (a.optString(0, "")) {
+                case "toast": bridge.toast(a.optString(1, "")); break;
+                case "mediaMenu": bridge.mediaMenu(a.optString(1, "")); break;
+                case "setVideoAspect": bridge.setVideoAspect(a.optInt(1), a.optInt(2)); break;
+                case "needLogin": bridge.needLogin(); break;
+                case "requestLogin": bridge.requestLogin(); break;
+                case "setGroupDrop": bridge.setGroupDrop(a.optBoolean(1)); break;
+                case "setGalleryOpen": bridge.setGalleryOpen(a.optBoolean(1)); break;
+                case "setMediaBars": bridge.setMediaBars(a.optBoolean(1)); break;
+                case "setEditorOpen": bridge.setEditorOpen(a.optBoolean(1)); break;
+                case "setPanelGesture":
+                    bridge.setPanelGesture(a.optInt(1), a.optInt(2), a.optInt(3), a.optInt(4));
+                    break;
+                default: break;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "bad bridge message", e);
+        }
+    }
+
+    private static boolean isAllowedOrigin(String url) {
+        if (url == null) {
+            return false;
+        }
+        Uri u = Uri.parse(url);
+        String host = u.getHost();
+        return "https".equals(u.getScheme()) && host != null && BRIDGE_HOST.matcher(host).matches();
+    }
+
+    /**
+     * 页面调过来的动作统一过这道闸。消息通道那条已经在监听器里判过来源与主框架;
+     * 退回 JS 接口的老 WebView 上只能按主框架当前 URL 判 —— getUrl 必须在 UI 线程读,
+     * 所以闸放在 runOnUiThread 里面,而不是桥方法入口(那里是 JavaBridge 线程)。
+     */
+    private void fromPage(Runnable action) {
+        runOnUiThread(() -> {
+            if (bridgeViaMessage || isAllowedOrigin(webView.getUrl())) {
+                action.run();
+            }
+        });
     }
 
     private void configureClients() {
@@ -865,6 +981,20 @@ public class MainActivity extends AppCompatActivity {
 
     /** 注入页面增强脚本:网页主题 + 悬浮导航 + 深色图片修复 + 视频滑动快进快退;幂等 */
     private void injectPageScripts(WebView view) {
+        // 必须排在最前:后面几份脚本都要用 window.BwNative
+        if (bridgeJs == null) {
+            bridgeJs = readAsset("bridge.js");
+        }
+        if (!bridgeJs.isEmpty()) {
+            view.evaluateJavascript(bridgeJs, null);
+        }
+        // 媒体分类(真视频 / 动图 / live 图):swipe_seek 与 media_save 共用,必须先于它们
+        if (clipJs == null) {
+            clipJs = readAsset("clip_kind.js");
+        }
+        if (!clipJs.isEmpty()) {
+            view.evaluateJavascript(clipJs, null);
+        }
         if (themeJs == null) {
             themeJs = readAsset("theme.js");
         }
@@ -955,7 +1085,7 @@ public class MainActivity extends AppCompatActivity {
 
         @JavascriptInterface
         public void toast(String message) {
-            runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show());
+            fromPage(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show());
         }
 
         /**
@@ -969,26 +1099,28 @@ public class MainActivity extends AppCompatActivity {
          */
         @JavascriptInterface
         public void mediaMenu(final String url) {
-            runOnUiThread(() -> showMediaMenu(url));
+            fromPage(() -> showMediaMenu(url));
         }
 
         /**
          * 播放器被按到的那一刻,把它那条片子的真实比例报上来,给全屏定方向。
          *
-         * 在 JS 线程回调,这里只写三个字段(不碰 UI);读侧 fullscreenOrientation 最坏
-         * 读到一次旧值,下次全屏就对了,不值得为它加锁。
+         * 和其余桥方法一样落在 UI 线程:读侧 fullscreenOrientation 也在那儿,
+         * 三个字段不必再为跨线程读旧值留余地。
          */
         @JavascriptInterface
         public void setVideoAspect(int w, int h) {
-            lastVideoW = Math.max(0, w);
-            lastVideoH = Math.max(0, h);
-            lastVideoAt = SystemClock.uptimeMillis();
+            fromPage(() -> {
+                lastVideoW = Math.max(0, w);
+                lastVideoH = Math.max(0, h);
+                lastVideoAt = SystemClock.uptimeMillis();
+            });
         }
 
         /** 页面脚本查到服务端登录态为"未登录"时回调,由原生决定跳登录页 */
         @JavascriptInterface
         public void needLogin() {
-            runOnUiThread(() -> redirectToLogin());
+            fromPage(MainActivity.this::redirectToLogin);
         }
 
         /**
@@ -997,7 +1129,7 @@ public class MainActivity extends AppCompatActivity {
          */
         @JavascriptInterface
         public void requestLogin() {
-            runOnUiThread(() -> {
+            fromPage(() -> {
                 loginSkipped = false;
                 loginSoftTried = false;
                 loginHardTried = false;
@@ -1008,7 +1140,7 @@ public class MainActivity extends AppCompatActivity {
         /** 首页分组下拉的开/合:展开时把下拉刷新手势让给弹层自己的滚动 */
         @JavascriptInterface
         public void setGroupDrop(final boolean open) {
-            runOnUiThread(() -> {
+            fromPage(() -> {
                 if (groupDropOpen == open) {
                     return;
                 }
@@ -1023,7 +1155,7 @@ public class MainActivity extends AppCompatActivity {
          */
         @JavascriptInterface
         public void setGalleryOpen(final boolean open) {
-            runOnUiThread(() -> {
+            fromPage(() -> {
                 if (galleryOpen == open) {
                     return;
                 }
@@ -1039,7 +1171,7 @@ public class MainActivity extends AppCompatActivity {
          */
         @JavascriptInterface
         public void setMediaBars(final boolean on) {
-            runOnUiThread(() -> applyMediaBars(on));
+            fromPage(() -> applyMediaBars(on));
         }
 
         /**
@@ -1048,7 +1180,7 @@ public class MainActivity extends AppCompatActivity {
          */
         @JavascriptInterface
         public void setEditorOpen(final boolean open) {
-            runOnUiThread(() -> {
+            fromPage(() -> {
                 if (editorOpen == open) {
                     return;
                 }
@@ -1065,7 +1197,7 @@ public class MainActivity extends AppCompatActivity {
          */
         @JavascriptInterface
         public void setPanelGesture(final int x, final int y, final int w, final int h) {
-            runOnUiThread(() -> {
+            fromPage(() -> {
                 if (w <= 0 || h <= 0) {
                     if (!panelGesture) {
                         return;
@@ -1108,6 +1240,12 @@ public class MainActivity extends AppCompatActivity {
                     webView.evaluateJavascript(
                             "try{window.__bwCloseGallery&&window.__bwCloseGallery()}catch(e){}", null);
                 } else if (webView.canGoBack()) {
+                    // 从登录页退回 = 这一趟暂不登录。不记这一笔,页面下一拍自愈又把登录页
+                    // 推回来(登录页多半是我们自己从首页推进去的,历史里就有首页),
+                    // 用户看到的就是"返回键按了没用,退不出去"
+                    if (isOnLoginPage()) {
+                        loginSkipped = true;
+                    }
                     webView.goBack();
                 } else if (isOnLoginPage()) {
                     // 未登录暂不登录:允许返回信息流浏览
@@ -1131,6 +1269,13 @@ public class MainActivity extends AppCompatActivity {
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         webView.saveState(outState);
+        // 深浅色切换会重建 Activity(uiMode 不在 configChanges 里)。这四个标记丢了,
+        // "暂不登录"会被自愈推翻、两档纠正的防死循环计数归零、正在走 SSO 的那一趟
+        // 会被首帧自愈弹回首页 —— 用户看到的就是切个深色就被送去重新登录
+        outState.putBoolean(STATE_LOGIN_SKIPPED, loginSkipped);
+        outState.putBoolean(STATE_LOGIN_SOFT_TRIED, loginSoftTried);
+        outState.putBoolean(STATE_LOGIN_HARD_TRIED, loginHardTried);
+        outState.putBoolean(STATE_LOGIN_ENTRY, loginEntry);
     }
 
     @Override

@@ -1,16 +1,16 @@
 /**
- * pulse 的长按手势 —— 只在"专门在看这条片子"的场合生效,两种片子两种走法。
+ * pulse 的长按手势 —— 只在"专门在看这条片子"的场合生效,循环短片与真视频两种走法。
  *
- * live 图:长按从头重播(live 图只自动放一遍,放过之后就是个停住的封面)。
- * 真视频:**按住不放走 2x,松手立刻还原**。倍速是"我此刻要快点看"而不是一个开关,
- * 所以不做 2x/1x 来回切 —— 松手回到按之前的倍速(站点或用户自己设的 1.5x 也照原样还)。
+ * live 图 / 动图:长按从头重播(live 图只自动放一遍;动图是 gif 转的 mp4,同样没有
+ * 可拖的进度)。真视频:**按住不放走 2x,松手立刻还原**。倍速是"我此刻要快点看"而不是
+ * 一个开关,所以不做 2x/1x 来回切 —— 松手回到按之前的倍速(站点或用户自己设的 1.5x
+ * 也照原样还)。
  *
  * 认场合:`.pswp`(全屏看图器)、`.mwb-layer`(站点那条视频浮层)、以及 HTML5 全屏的
  * 播放器(`:fullscreen`)。信息流里的内联视频不接长按,那是读帖时的误触面。
  *
- * 站点把 live 图与视频都渲染成一张 `<video>`,按直链分:live 图固定是
- * video.weibo.com/media/play?livephoto=<编码后的 .mov>(见 MainActivity#saveMediaUrl),
- * 比按时长猜稳。
+ * 三类片子的判据统一在 clip_kind.js(直链标记 livephoto= / label=gif_mp4,其余按真视频),
+ * 这里不再自己认字符串,也不按时长猜。
  */
 (function () {
   if (!document.documentElement) return;
@@ -63,13 +63,10 @@
     return v;
   }
 
-  function isLive(v) {
-    var src = v.currentSrc || v.src || '';
-    if (!src && v.querySelector) {
-      var s = v.querySelector('source');
-      src = s ? (s.src || s.getAttribute('src') || '') : '';
-    }
-    return src.indexOf('livephoto=') >= 0;
+  /* 统一判据:live / gif / video / unknown。分类未定时(直链还没到、元数据还没到)
+     按"不是真视频"处理 —— 不长按加速、不重播,等元数据到了自然归位。 */
+  function clipKind(v) {
+    return window.BwClip && window.BwClip.kindOf ? window.BwClip.kindOf(v) : 'video';
   }
 
   function enterFast() {
@@ -100,7 +97,7 @@
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (hold) leaveHold();                   // 上一根手指还没抬起就按新的:先还原
     var v = scopeVideo(e.target);
-    if (!v || isLive(v)) return;             // live 图仍交给 contextmenu 的重播
+    if (!v || clipKind(v) !== 'video') return;   // live 图/动图仍交给 contextmenu 的重播
     hold = {
       v: v, id: e.pointerId, x: e.clientX, y: e.clientY, back: null,
       timer: setTimeout(enterFast, HOLD_MS)
@@ -114,15 +111,23 @@
     }
   }, true);
 
-  /* 抬起要挂在 window 上:手指滑出播放器甚至浮层外面才松手时,也得把速度还回去 */
-  window.addEventListener('pointerup', leaveHold, true);
-  window.addEventListener('pointercancel', leaveHold, true);
+  /* 抬起要挂在 window 上:手指滑出播放器甚至浮层外面才松手时,也得把速度还回去。
+     但多指时 window 会收到**每一根**手指的抬起 —— 只认长按那根(pointerId),
+     否则另一根手指先抬起就把倍速提前还原了。 */
+  function endHold(e) {
+    if (!hold) return;
+    if (e && e.pointerId != null && e.pointerId !== hold.id) return;
+    leaveHold();
+  }
+  window.addEventListener('pointerup', endHold, true);
+  window.addEventListener('pointercancel', endHold, true);
 
   document.addEventListener('contextmenu', function (e) {
     var v = scopeVideo(e.target);
     if (!v) return;
     e.preventDefault();                       // 挡掉原生"保存/复制链接"那层菜单
-    if (!isLive(v)) return;                   // 真视频的长按由上面的按下状态机处理
+    var k = clipKind(v);
+    if (k !== 'live' && k !== 'gif') return;  // 真视频的长按由上面的按下状态机处理
     // 重播本身看得见,不再叠一颗提示胶囊
     try {
       v.currentTime = 0;

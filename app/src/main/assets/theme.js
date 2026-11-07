@@ -2487,6 +2487,10 @@
     '  margin-left: var(--bw-gutter) !important;',
     '  margin-right: var(--bw-gutter) !important;',
     '  width: auto !important;',
+    '  /* 与同页卡片同一圈 1px 内描边:切换栏原本只有一层卡面色差,深色档卡面(25)与',
+    '     页面底(17)差 8 档,边缘读不出边界;补上后与下方微博卡是同一族的"卡"。 */',
+    '  outline: 1px solid var(--bw-line) !important;',
+    '  outline-offset: -1px !important;',
     '}',
     '/* 站点在 nav 的直接子层挂了 .m-box{padding-bottom:20px}:横排那一档它是给吸顶让位,',
     '   但同时把卡撑成实测 64 高而内容只有 44 —— 卡底一块读不通的空(用户报的"切换栏明显',
@@ -2512,7 +2516,49 @@
     '  left: auto !important;',
     '  right: auto !important;',
     '}',
+    '/* 站点给"吸顶"准备的占位壳:nav 变成 fixed 时它被撑到 37 高(nav 自己的高度),',
+    '   nav 归位后这段空白仍留在流里 —— 滚动过阈值时切换栏会突然往下跳 37px,',
+    '   与封面之间从 8 变成 45。它是个空 div,直接收掉,跳位随之消失。 */',
+    'html.bw-cardpage .m-top-nav-wrapper { display: none !important; }',
     '@media (max-width: 767px) {',
+    '  /* ===== 手机档头部:从"通栏海报"收成与信息流同族的卡 =====',
+    '     这一页没有站点顶栏,封面就是页首。原来封面 0..411 通栏、方角、无描边,',
+    '     而下面所有卡片都是 10px 页边距 + 18 圆角 + 1px 描边 —— 头部与其余部分',
+    '     不像同一个产品。这里只给封面套上"卡框"(页边距/圆角/卡底/描边),',
+    '     头像与昵称仍压在图上(站点结构不动),整块读作一张卡。 */',
+    '  html.bw-cardpage .profile-cover {',
+    '    margin-left: var(--bw-gutter) !important;',
+    '    margin-right: var(--bw-gutter) !important;',
+    '    border-radius: var(--bw-card-radius) !important;',
+    '    overflow: hidden !important;',
+    '    background-color: var(--bw-card) !important;',
+    '    outline: 1px solid var(--bw-line) !important;',
+    '    outline-offset: -1px !important;',
+    '  }',
+    '  /* 头图压暗渐变:站点那条是 40%→95% 且整层 opacity .7(等效到昵称处只有 .21),',
+    '     亮封面上白字会糊。改成按"昵称/粉丝/认证"三行的位置给阶梯、底部收到 .80 ——',
+    '     既保住白字对比度,也让封面下沿自然收进卡角,不再与切换栏硬碰。 */',
+    '  html.bw-cardpage .profile-cover > .overlay {',
+    '    opacity: 1 !important;',
+    '    background: linear-gradient(180deg, rgba(0,0,0,0) 30%, rgba(0,0,0,.18) 46%,',
+    '      rgba(0,0,0,.52) 62%, rgba(0,0,0,.72) 82%, rgba(0,0,0,.80) 100%) !important;',
+    '  }',
+    '  /* 昵称与资料行:昵称提到 600(站点是 18/400),粉丝/认证统一 12 */',
+    '  html.bw-cardpage .profile-cover .mod-fil-name .txt-shadow {',
+    '    font-size: 18px !important;',
+    '    font-weight: 600 !important;',
+    '  }',
+    '  html.bw-cardpage .profile-cover .mod-fil-fans .txt-shadow {',
+    '    font-size: 12px !important;',
+    '  }',
+    '  html.bw-cardpage .profile-cover .mod-fil-desc { font-size: 12px !important; }',
+    '  /* 切换栏与封面之间留 8px(全站卡间距 --bw-card-gap),不再贴在一起;',
+    '     底边同样收到 8,与"卡 → 卡"的同一条节奏对齐。仍然不吸顶(见上方 .fixed 段):',
+    '     这一页没有站点顶栏可依,吸顶只会和左上那颗返回球叠成两层浮件。 */',
+    '  html.bw-cardpage #app nav.m-top-nav {',
+    '    margin-top: var(--bw-card-gap) !important;',
+    '    margin-bottom: var(--bw-card-gap) !important;',
+    '  }',
     '  /* 这一页是二级页、没有悬浮导航,所以底部这块就是全站悬浮带的落点:与评论输入条',
     '     .lite-page-editor 同一份配方(10px 页边距 + 贴底 14 + 18 圆角 + 玻璃底 + outline',
     '     + 投影)。原来它是通栏贴底的一条,与左右都收进 10px 的卡片对不齐。',
@@ -2795,7 +2841,7 @@
     '  html.bw-prof #app nav.m-top-nav.m-container-max {',
     '    width: 340px !important;',
     '    max-width: none !important;',
-    '    margin: 12px 0 0 !important;',
+    '    margin: var(--bw-card-gap) 0 0 !important;',
     '    /* 站点滚过一页会给这条挂 .fixed(position:fixed;top:0;left:0;right:0),',
     '       横排时它是"吸顶分类条",竖排后就变成钉在视口左缘的一条 340 宽竖栏,',
     '       压住左上返回球、还吃掉了左列的位置。这一族的切换栏常驻在左列里,',
@@ -2880,13 +2926,21 @@
     '    html.bw-cardpage .m-tab-bar.m-bar-panel .m-diy-btn:active {',
     '      background-color: var(--bw-card-active) !important;',
     '    }',
-    '    /* 选中项的竖条从文字那一侧长出来,而不是凭空出现(平板竖排那条) */',
+    '    /* 选中项的竖条"长出来"而不是凭空出现。',
+    '       **关键帧里不能碰 transform**:它会把元素自己那份定位 transform 整份换掉 ——',
+    '       手机档站点那条是 `left:50%` + `translateX(-12px)`,平板档我们写的是',
+    '       `translateY(-50%)`;动画一开始这两段就丢了,蓝条先偏 12px(平板先掉到字底)',
+    '       再滑回正确位置,就是用户报的"先歪一下再回到正确位置"。而且这段动画在样式注入、',
+    '       页首首次渲染时也会整段演一遍,所以一进主页就能看见。',
+    '       改用独立的 `scale` 属性:它与 transform 相乘,只围绕自身中心缩放,',
+    '       位置一帧都不动;两种朝向(手机横条 / 平板竖条)也不用各写一套关键帧。',
+    '       老 WebView 不认 scale 时退化成纯淡入,同样不位移。 */',
     '    html.bw-cardpage nav.m-top-nav ul.nav-item li.m-cur span::after {',
     '      animation: bw-prof-mark 190ms cubic-bezier(.2,.8,.2,1);',
     '    }',
     '    @keyframes bw-prof-mark {',
-    '      from { transform: translateY(-50%) scaleY(.25); opacity: .25; }',
-    '      to { transform: translateY(-50%) scaleY(1); opacity: 1; }',
+    '      from { scale: .25; opacity: .25; }',
+    '      to { scale: 1; opacity: 1; }',
     '    }',
     '    /* "已关注"的弹层站点是直接翻 display(none<->block)。display 不参与过渡,',
     '       所以要 allow-discrete 才留得住这 120ms:淡入 + 从按钮那侧上浮,收起原路回去。 */',
@@ -4861,11 +4915,15 @@
          —— 就是表现为"手机端颜色全不对、平板端正常"。
          这里在**发现深色令牌已经排在自己后面**时,把 #bw-theme 重新插到它前面,
          把顺序拉回正确且幂等;没有深色令牌(浅色模式)时保持原位不动,
-         避免无谓的重排引发样式重算。 */
+         避免无谓的重排引发样式重算。
+         插到**令牌自己的父节点**里,不是 head:dark_fix.js 同步执行那一刻可能还没有
+         head,令牌就挂在了 documentElement 上;等 head 解析出来,拿 head 当父节点
+         去 insertBefore 会抛 NotFoundError,连带后面写 CSS 那一句一起不执行 ——
+         整份主题一次都没生效。 */
     var darkToken = document.getElementById('bw-dark-token');
-    if (darkToken &&
+    if (darkToken && darkToken.parentNode &&
         (s.compareDocumentPosition(darkToken) & Node.DOCUMENT_POSITION_PRECEDING)) {
-      parent.insertBefore(s, darkToken);
+      darkToken.parentNode.insertBefore(s, darkToken);
     }
     if (s.__bwCss !== CSS) {
       s.textContent = CSS;
@@ -4944,10 +5002,16 @@
     }, 300);
   }
 
-  scheduleKb();
-  try {
-    new MutationObserver(scheduleKb).observe(document.documentElement, {
-      childList: true, subtree: true
-    });
-  } catch (e) { /* ignore */ }
+  /* 同一文档里这份脚本会被注入多次(onPageStarted + onPageFinished)。样式节点按 id
+     幂等了,观察器没有:每注入一次就多挂一个,同一批 DOM 变更会跑 N 遍整页扫描。
+     用 window 上的实例标记挡住重复注册(新文档是新的 window,标记自然重来)。 */
+  if (!window.__bwKbWatch) {
+    window.__bwKbWatch = true;
+    scheduleKb();
+    try {
+      new MutationObserver(scheduleKb).observe(document.documentElement, {
+        childList: true, subtree: true
+      });
+    } catch (e) { /* ignore */ }
+  }
 })();
