@@ -263,21 +263,230 @@
   /* 站点在开启动画跑完之前会**忽略**这一按(实测:点图后 150ms 内按返回,那颗关闭键
      就在 367,0 44x44、visible 且 pointer-events:auto,按下去什么都不发生)。而原生
      那一按已经被消费掉了,不会再有人按第二次 —— 所以按完自己盯一会儿。
-     这张表是**相邻两次之间的间隔**(累计 0/120/320/600/1000ms),每一轮只在"还开着"时
-     再排下一轮,关掉就断链;五轮都按不动才硬收(硬收会让站点以为还开着,是最后手段)。 */
-  var CLOSE_RETRY = [0, 120, 200, 280, 400];
+     这张表是**相邻两次之间的间隔**(累计 0/120/320/600/1000/1600/2400ms),每一轮只在
+     "还开着"时再排下一轮,关掉就断链。
+     收尾**绝不能**写 `p.style.display='none'`:站点收起时只摘 `pswp--open` 类、把内联
+     style 清空,`display:block` 全靠这个类 —— 我们写进去的内联 none 站点永远不清,
+     于是下次开图站点仍当自己开着、第一下点击被吃(用户报的"要点两次"),
+     再被重开时又成了 `display:block` + 近乎 0 的 opacity 的隐形全屏层,整页点不动、
+     只能按返回(用户报的"图片消失 + 界面卡住")。硬收改成走站点自己的关闭路。 */
+  var CLOSE_RETRY = [0, 120, 200, 280, 400, 600, 800];
+
+  /* 关闭意图的世代:`.pswp` 的 `pswp--open` 每出现一次就是新的一代。
+     一条关闭链最长能跑 900(等动画)+ 2400(重试)+ 600(复查)ms,而用户完全可以在这
+     期间关掉 A 又点开 B;链里只按"浮层还开着"判活的话,给 A 收尾的那一拍会落在 B 上。
+     实测:开 A → 立即返回 → 100~500ms 内开 B,300ms 档 10/10 次 B 刚全屏就被上一代的
+     关闭键收回(点击栈落在本文件的 step 里,点击时 B 还在 opacity 0.001~0.04)。
+     所以这里做三件事:
+     ① 新一代开始时把上一代所有还没到的定时器清掉;
+     ② 每次关闭都带一份意图快照(代 + 节点 + 当前 gid/pid),对不上立刻放弃;
+     ③ 自愈、Escape、复查都只对发起它的那一代有效。 */
+  var galleryGen = 0, galleryClassOpen = false, galleryClassKey = '', galleryAnimIn = false,
+    galleryEverSettled = false, closeTimers = [];
+
+  function cancelCloseTimers() {
+    for (var i = 0; i < closeTimers.length; i++) clearTimeout(closeTimers[i]);
+    closeTimers.length = 0;
+  }
+
+  function closeTimeout(fn, ms) {
+    var id = setTimeout(function () {
+      var k = closeTimers.indexOf(id);
+      if (k >= 0) closeTimers.splice(k, 1);
+      fn();
+    }, ms);
+    closeTimers.push(id);
+  }
+
+  /* 收尾动画期间站点仍让 .pswp 铺满屏幕:实测从按下关闭到 display:none 有约 400ms,
+     这段时间 .pswp/.pswp__img 的 pointer-events 都是 auto,点下一张图会被整层吃掉
+     —— 用户看到的就是"关掉图之后马上点，没反应"。收尾一开始就把这一层让开,
+     点击直接落到信息流上;重新打开(或彻底关完)时再还回去。
+     只动 pointer-events,不碰 display/opacity,不影响站点自己的收起动画。 */
+  var galleryPass = {used: false, block: 0};
+
+  function galleryPassThrough(p) {
+    if (!p || p.style.pointerEvents === 'none') return;
+    p.style.pointerEvents = 'none';
+    galleryPass.used = false;
+    galleryPass.block = 0;
+    /* 万一这一按站点没接(图还开着),700ms 后把点击还回去,别把人困在层里 */
+    setTimeout(function () {
+      if (p.classList.contains('pswp--open') && p.classList.contains('pswp--animated-in')) {
+        galleryPassThroughEnd(p);
+      }
+    }, 700);
+  }
+
+  function galleryPassThroughEnd(p) {
+    if (p && p.style.pointerEvents === 'none') p.style.pointerEvents = '';
+    galleryPass.used = false;
+    galleryPass.block = 0;
+  }
+
+  /* 单条视频走的是站点自己的播放浮层(.mwb-layer),不是看图器:它收起时挂 Vue 的
+     fade-leave 过渡(实测类一旦挂上,整层还有约 180ms 铺在命中链最上面、
+     pointer-events 仍是 auto)。2026-11 实测:按返回后 50ms 点同一条视频,
+     这一记点击被浮层吃掉,完全没有反应 —— 与看图器收起时同一类问题。
+     按站点自己的过渡类让开:只动 pointer-events,不碰 display/opacity,
+     收起动画本身照常跑;打开(fade-enter*)或过渡类摘掉时立刻还回去。 */
+  var videoLayerPass = false;
+
+  function syncVideoLayerPass() {
+    var ly = document.querySelector('.mwb-layer');
+    if (!ly) return;
+    if (/leave/.test(ly.className || '')) {
+      if (!videoLayerPass) {
+        ly.style.pointerEvents = 'none';
+        videoLayerPass = true;
+        /* 过渡类万一没被摘干净,700ms 后兜底还回去,别把整页永久堵死 */
+        setTimeout(function () {
+          if (ly.style.pointerEvents === 'none' && !/leave/.test(ly.className || '')) {
+            ly.style.pointerEvents = '';
+            videoLayerPass = false;
+          }
+        }, 700);
+      }
+      return;
+    }
+    if (videoLayerPass) {
+      ly.style.pointerEvents = '';
+      videoLayerPass = false;
+    }
+  }
+
+  /* 当前这张图在地址上的身份(站点看图时写 #&gid=…&pid=…);还没写就是空串 */
+  function galleryKey() {
+    var s = location.hash + ' ' + location.search;
+    var g = /gid=(\d+)/.exec(s), d = /pid=(\d+)/.exec(s);
+    if (!g && !d) return '';
+    return (g ? g[1] : '') + '/' + (d ? d[1] : '');
+  }
+
+  /* 当前正在展示的那张图(src)。地址上的 gid/pid 在"关一张又开另一张"时可能一字不差
+     —— 实测站点每次都写 #&gid=1&pid=1 —— 只比它认不出换了一张;这张图的 src 会变。 */
+  function gallerySlideKey(p) {
+    var im = p && p.querySelector('.pswp__img:not(.pswp__img--placeholder)');
+    return im ? String(im.getAttribute('src') || im.src || '') : '';
+  }
+
+  function noteGalleryOpen(p) {
+    p = p || document.querySelector('.pswp');
+    var now = !!(p && p.classList.contains('pswp--open'));
+    var anim = !!(p && p.classList.contains('pswp--animated-in'));
+    var key = now ? galleryKey() : '';
+    /* 三种都算新一代:关着→开着;一直开着但换了图(pid 变了);开启动画又跑完一次
+       (`pswp--animated-in` 重新出现)。
+       最后一条专治"关 A 的动画还没收完、B 已经在同一颗 .pswp 上开场":实测这条路上
+       `pswp--open` 一直没摘、地址也可能一模一样 —— 2026-11 实测平板 100ms 档 2/10 次
+       B 被上一代关闭链打中就是这个原因:类与地址都给不出换代信号,只有动画完成标记
+       会先被站点摘掉、再在 B 开完时加回来。 */
+    if (now && (!galleryClassOpen ||
+        (key && galleryClassKey && key !== galleryClassKey) ||
+        (anim && !galleryAnimIn && galleryEverSettled))) {
+      galleryGen++;
+      cancelCloseTimers();
+    }
+    galleryClassOpen = now;
+    galleryClassKey = key;
+    galleryAnimIn = anim;
+    /* 开稳/彻底关完就把收尾期的点击穿透还回去;收起动画进行中(open 但没 animated-in)保持让开 */
+    if (!now || anim) galleryPassThroughEnd(p);
+    /* 这一袋图"曾经开稳过"之后 animated-in 再出现才算重开。
+       同一袋图开启动画刚跑完不算换代 —— 用户就是在动画里按的返回,那种换代会把
+       自己这条刚排上的关闭链作废,图反而关不掉(实测打回 midopen-close)。 */
+    if (!now) galleryEverSettled = false;
+    else if (anim) galleryEverSettled = true;
+    return now;
+  }
+
+  /* 这份意图还算不算数:代没换、节点还是那颗、还是同一张图 */
+  function galleryIntentAlive(it) {
+    if (it.gen !== galleryGen) return false;
+    if (document.querySelector('.pswp') !== it.p) return false;
+    /* 发起时地址上还没写 pid 的(开图中途按的返回)不比身份,交给代去兜 */
+    if (it.key && galleryKey() !== it.key) return false;
+    /* 同一个 gid/pid 下换了图(开了另一张,或用户自己翻页):不是该关的那一个 */
+    if (it.slide && gallerySlideKey(it.p) !== it.slide) return false;
+    return true;
+  }
 
   function closeGallery() {
     var p = document.querySelector('.pswp');
     if (!p) return;
+    noteGalleryOpen(p);
+    var steady = function () { return p.classList.contains('pswp--animated-in'); };
+    var it = {p: p, gen: galleryGen, key: galleryKey(), slide: gallerySlideKey(p),
+      anim: steady()};
+    /* 站点当自己开着(有 pswp--open)、却被一条内联 display:none 压着 —— 这个组合只有
+       我们早先那次硬收写得出来,站点自己从不写。先抹掉坏内联值让 CSS 接管,再走正常
+       关闭;不抹的话这次返回什么也做不了,下一记开图点击还会被当成"已经开着"吃掉。 */
+    if (p.classList.contains('pswp--open') && p.style.display === 'none') healPswp(it);
     var step = function (i) {
-      if (!pswpOpen()) return;
-      if (i >= CLOSE_RETRY.length) { p.style.display = 'none'; return; }
-      var b = document.querySelector('.pswp__button--close');
-      if (b) b.click();
-      setTimeout(function () { step(i + 1); }, CLOSE_RETRY[i]);
+      if (!galleryIntentAlive(it) || !pswpOpen()) return;
+      /* 见过开稳态之后 `pswp--animated-in` 消失,只有两种可能:站点已经接下这一按、
+         正在收起;或者已经换成新的一张在开场。两种都不该再补刀 —— 实测上一版就是
+         这一拍在 100~500ms 的"关 A 开 B"里落到 B 头上。 */
+      if (it.anim && !steady()) return;
+      if (i >= CLOSE_RETRY.length) { dismissGallery(it); return; }
+      var b = p.querySelector('.pswp__button--close') ||
+        document.querySelector('.pswp__button--close');
+      if (b) { galleryPassThrough(p); b.click(); }
+      closeTimeout(function () { step(i + 1); }, CLOSE_RETRY[i]);
     };
-    step(0);
+    /* 开启动画没跑完之前先别按(按了也是白按,还可能跟站点抢状态):
+       等站点挂上 `pswp--animated-in`,最多等 900ms —— 等不到也照按,
+       慢机/坏态下不能一直不关。 */
+    var waited = 0;
+    (function begin() {
+      if (!galleryIntentAlive(it) || !pswpOpen()) return;
+      if (!steady() && waited < 900) {
+        waited += 60;
+        closeTimeout(begin, 60);
+        return;
+      }
+      it.anim = it.anim || steady();
+      step(0);
+    })();
+  }
+
+  /* 所有重试都按不动时的兜底:Escape 是 PhotoSwipe 自己接的关闭键(实测能连 hash
+     一起收干净),但只在动画结束后才安全 —— 动画中发会出现"先关又被重开"的竞态,
+     所以放在最后,此时动画最晚也已等过 900ms + 2.4s。发之前再核一次身份:
+     代/节点/pid 任何一个对不上都放弃,不能把后来点开的那张关掉。 */
+  function dismissGallery(it) {
+    if (!galleryIntentAlive(it) || !pswpOpen()) return;
+    /* 站点正在开/收动画时不发:动画中发 Escape 会"先关又被重开",也可能落到下一张上 */
+    if (!it.p.classList.contains('pswp--animated-in')) return;
+    try {
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true
+      }));
+    } catch (e) { /* 老 WebView 不支持 KeyboardEvent 构造:交给 history */ }
+    closeTimeout(function () {
+      if (!galleryIntentAlive(it)) return;
+      if (pswpOpen()) { galleryPassThroughEnd(it.p); healPswp(it); }
+      else if (it.p.style.display === 'none') healPswp(it);
+    }, 600);
+  }
+
+  /* 早先硬收留下的坏内联值自愈:内联 `display:none`(站点当开、我们藏了)或
+     `opacity` 近乎 0(隐形全屏层)站点自己永远不会写、也永远不会清,见到就抹掉,
+     让 CSS 类重新接管;抹完若还开着,趁站点还当自己开着补一次正常关闭。 */
+  function healPswp(it) {
+    var p = it.p, dirty = false;
+    if (p.style.display === 'none') { p.style.display = ''; dirty = true; }
+    var op = parseFloat(p.style.opacity);
+    if (!isNaN(op) && op < 0.02) { p.style.opacity = ''; dirty = true; }
+    if (!dirty) return;
+    closeTimeout(function () {
+      if (!galleryIntentAlive(it) || !pswpOpen()) return;
+      /* 自愈补的那一按同样只在开稳态才发:站点已经在动(开/收)时不要抢 */
+      if (it.anim && !p.classList.contains('pswp--animated-in')) return;
+      var b = p.querySelector('.pswp__button--close') ||
+        document.querySelector('.pswp__button--close');
+      if (b) b.click();
+    }, 60);
   }
   /* 看图浮层不产生历史记录,原生返回回调开着它时要先关浮层,否则会直接跳出这一页 */
   window.__bwCloseGallery = closeGallery;
@@ -308,6 +517,9 @@
   }
 
   function syncGalleryOverlay() {
+    /* 先认世代:`.pswp` 的开放态一变就把上一代的关闭链整体作废(见 noteGalleryOpen)。
+       观察器、滚动的 refresh、250ms 调度都会进这里,离了观察器也不会漏。 */
+    noteGalleryOpen();
     var open = pswpOpen();
     /* 只在真的换态时过一趟 JS→Java 桥:原来每次调用都无条件报一遍,
        而调用方是滚动事件 + 每 250ms 的调度 + .pswp 的变异观察器。 */
@@ -352,6 +564,7 @@
            浮层的开合一刀就写在这两个属性上，盯住它们才不依赖 refresh 什么时候再来。 */
         pswpObs = new MutationObserver(function () {
           syncGalleryOverlay();
+          syncVideoLayerPass();
           overlayEdge(overlayOpen());
         });
         /* 只看 .pswp 自己的 class/style —— 开关态就写在这两个属性上。
@@ -385,6 +598,7 @@
     } else if (!want && chip) {
       chip.remove();
     }
+    syncVideoLayerPass();
   }
 
   /* 未读角标:站点把数字写在顶栏消息入口里的 .m-bubble 上,而 theme.js 把
@@ -3225,6 +3439,50 @@
         restoreListAnchor();
       }
     }, {passive: true});
+    /* 用户点站点自己的 X 关图时也把收尾层的点击让开:否则紧接着点下一张会被
+       那颗还在淡出的 .pswp 吃掉(实测收尾约 400ms)。只在开稳态接这一下,
+       开启动画里的误触不接管。 */
+    document.addEventListener('click', function (e) {
+      var p = document.querySelector('.pswp');
+      var t = e.target;
+      if (p && t && t.closest && t.closest('.pswp__button--close') &&
+          p.classList.contains('pswp--animated-in')) {
+        galleryPassThrough(p);
+      }
+    }, true);
+    /* 收尾期让开的那一层只放行一记点击;这之后再来的手指(连点/双击的第二下)
+       在信息流上直接吞掉,既不会开成另一张,也不会落到正在开场的浮层上把它点关。 */
+    document.addEventListener('touchstart', function (e) {
+      var p = document.querySelector('.pswp');
+      var t = e.target;
+      if (!p || p.style.pointerEvents !== 'none' || !t || !t.closest || t.closest('.pswp')) return;
+      if (!p.classList.contains('pswp--open') || p.classList.contains('pswp--animated-in')) {
+        galleryPassThroughEnd(p);
+        return;
+      }
+      if (galleryPass.used) {
+        galleryPass.block = Date.now() + 800;
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+    document.addEventListener('touchend', function (e) {
+      var p = document.querySelector('.pswp');
+      var t = e.target;
+      if (!p || p.style.pointerEvents !== 'none' || !t || !t.closest || t.closest('.pswp')) return;
+      galleryPass.used = true;
+    }, true);
+    document.addEventListener('click', function (e) {
+      var p = document.querySelector('.pswp');
+      var t = e.target;
+      if (!p || p.style.pointerEvents !== 'none' || !t || !t.closest || t.closest('.pswp')) return;
+      if (galleryPass.block && Date.now() < galleryPass.block) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      galleryPass.used = true;
+    }, true);
     /* 用户自己动了手就别再抢:复位那条链一拍内作废。
        anchorFrozen 必须跟着清:被顶掉的 step 有 run 守卫、不会走 stop(),
        留着它 noteListAnchor 会一直拒记,这一趟浏览的新位置全丢。 */
